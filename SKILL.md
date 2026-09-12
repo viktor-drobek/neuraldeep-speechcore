@@ -9,7 +9,6 @@ description: >
 metadata:
   neuraldeep:
     emoji: "🎙️"
-    requires_file: "~/.coddy/providers/neuraldeep/neuraldeep-auth.json"
     base_url: "https://speechcore.neuraldeep.ru/api"
     endpoints:
       - /upload
@@ -32,35 +31,20 @@ Use this skill whenever the user needs:
 
 ## Requirements
 
-### Primary key source
-Read from the Coddy provider auth file:
-```bash
-~/.coddy/providers/neuraldeep/neuraldeep-auth.json
-```
-That JSON contains `api_key` (e.g. `sk-...`).
+Python 3.10+ is sufficient; the helper uses only the standard library.
+Run commands from this skill's directory. No `curl`, `jq`, or `httpx` is required.
 
-Extract inline:
-```bash
-jq -r '.api_key' ~/.coddy/providers/neuraldeep/neuraldeep-auth.json
-```
+The helper first reads `api_key` from
+`${CODDY_HOME:-~/.coddy}/providers/neuraldeep/neuraldeep-auth.json`, then falls
+back to `NEURALDEEP_API_KEY` for missing, malformed, null, or empty file values.
+It never prints the key. If neither source works, it returns `blocked`; use
+`coddy providers login neuraldeep` or supply the environment variable securely.
+Do not use `jq -r .api_key` as a presence check: JSON null becomes the string `null`.
 
-### Fallback key source (env)
-```bash
-${NEURALDEEP_API_KEY}
-```
-
-### System requirement
-- The `curl` tool is available.
-- The `jq` tool is available (or fallback to Python/Node).
-- Audio/video file is accessible on local filesystem.
-
-## Resolve API key helper
-
-```bash
-ND_KEY=$(jq -r '.api_key' ~/.coddy/providers/neuraldeep/neuraldeep-auth.json 2>/dev/null)
-[ -z "$ND_KEY" ] && ND_KEY="${NEURALDEEP_API_KEY}"
-```
-If both are empty → return `BLOCKED` and suggest: `coddy providers login neuraldeep`.
+Read [Starter and Relay safety](STARTER_RELAY.md) before submitting work.
+Every billed operation must pass the helper's live subscription, public-price,
+and service-quota checks. A chat `decision.can_request=false` is not a service
+quota decision. State files and artifacts are private runtime data, not repo files.
 
 ## Base URL
 
@@ -72,13 +56,10 @@ https://speechcore.neuraldeep.ru/api
 
 ## 1. Upload and Start Transcription
 
-### curl example
+### Guarded helper example
 ```bash
-ND_KEY=$(jq -r '.api_key' ~/.coddy/providers/neuraldeep/neuraldeep-auth.json 2>/dev/null || echo "${NEURALDEEP_API_KEY}")
-curl -X POST \
-  "https://speechcore.neuraldeep.ru/api/upload?diarize=true&diarize_speakers_num=3&language=ru&hotwords=NeuralDeep,Kimi,RAG&initial_prompt=Технический%20созвон%20про%20LLM" \
-  -H "Authorization: Bearer ${ND_KEY}" \
-  -F "file=@meeting.mp3"
+# Read-only check. Expected to exit nonzero: no verified remaining-quota endpoint.
+python3 scripts/client.py check upload
 ```
 
 **Options (URL query parameters):**
@@ -99,14 +80,13 @@ curl -X POST \
 ## 2. Poll Status
 
 ```bash
-ND_KEY=$(jq -r '.api_key' ~/.coddy/providers/neuraldeep/neuraldeep-auth.json 2>/dev/null || echo "${NEURALDEEP_API_KEY}")
-TID="<task_id_from_upload>"
-curl -sS "https://speechcore.neuraldeep.ru/api/transcriptions/${TID}/status" \
-  -H "Authorization: Bearer ${ND_KEY}"
+# Attach an already existing job; this does not upload or spend a credit.
+# Replace PROVIDER_JOB_ID with the real ID, never submit again to obtain one.
+python3 scripts/client.py resume --job-id PROVIDER_JOB_ID --state speech-state.json --output transcript.json --timeout 1200
 ```
 
 **Response:**
-```json
+```text
 {"status": "processing", "progress": 45}
 # or:
 {"status": "completed", "progress": 100}
@@ -119,12 +99,9 @@ curl -sS "https://speechcore.neuraldeep.ru/api/transcriptions/${TID}/status" \
 ## 3. Fetch Transcript Result
 
 ### Full JSON with segments (text + timestamps + speakers)
-```bash
-ND_KEY=$(jq -r '.api_key' ~/.coddy/providers/neuraldeep/neuraldeep-auth.json 2>/dev/null || echo "${NEURALDEEP_API_KEY}")
-TID="<task_id>"
-curl -sS "https://speechcore.neuraldeep.ru/api/transcriptions/${TID}" \
-  -H "Authorization: Bearer ${ND_KEY}"
-```
+The helper writes the JSON from `GET /transcriptions/{id}` only after
+`GET /transcriptions/{id}/status` confirms `completed`, before the deadline.
+Use the artifact reference in the returned envelope; never treat a timeout as success.
 
 **Response fields:**
 - `detected_language`
@@ -132,51 +109,27 @@ curl -sS "https://speechcore.neuraldeep.ru/api/transcriptions/${TID}" \
 - `segments` — array of `{speaker, text, start, end}` objects
 
 ### Markdown with timestamps
-```bash
-curl -sS "https://speechcore.neuraldeep.ru/api/transcriptions/${TID}/markdown" \
-  -H "Authorization: Bearer ${ND_KEY}"
-```
+`GET /transcriptions/{id}/markdown` provides timestamped markdown after completion.
+The minimal helper saves JSON; custom callers can select markdown with the same
+bounded polling primitive.
 
 ### List your transcriptions
-```bash
-curl -sS "https://speechcore.neuraldeep.ru/api/transcriptions?limit=20" \
-  -H "Authorization: Bearer ${ND_KEY}"
-```
+`GET /transcriptions?limit=20` lists existing transcriptions. This is read-only;
+keep returned IDs and transcript metadata private.
 
 ---
 
 ## 4. Complete Python Example
 
 ```python
-import time, httpx, json, os
-
-BASE = "https://speechcore.neuraldeep.ru/api"
-KEY = json.load(open(os.path.expanduser(
-    "~/.coddy/providers/neuraldeep/neuraldeep-auth.json"
-)))["api_key"]
-H = {"Authorization": f"Bearer {KEY}"}
-
-# 1. Upload
-params = {
-    "diarize": "true",
-    "diarize_speakers_num": 3,
-    "language": "ru",
-    "hotwords": "NeuralDeep, Kimi, RAG",
-    "initial_prompt": "Технический созвон про LLM",
-}
-with open("meeting.mp3", "rb") as f:
-    tid = httpx.post(f"{BASE}/upload", headers=H, params=params, files={"file": f}).json()["task_id"]
-
-# 2. Poll (every 2 seconds, max 600 attempts ~20 min)
-for i in range(600):
-    st = httpx.get(f"{BASE}/transcriptions/{tid}/status", headers=H).json()
-    if st["status"] in ("completed", "failed"):
-        break
-    time.sleep(2)
-
-# 3. Fetch data = httpx.get(f"{BASE}/transcriptions/{tid}", headers=H).json()
+import json
+from pathlib import Path
+import subprocess
+# Resume an existing job using its durable private state. No upload occurs.
+subprocess.run(["python3", "scripts/client.py", "resume", "--state", "speech-state.json",
+                "--output", "transcript.json", "--timeout", "1200"], check=True)
+data = json.loads(Path("transcript.json").read_text())
 print("lang:", data["detected_language"], "duration:", data["duration"])
-print(httpx.get(f"{BASE}/transcriptions/{tid}/markdown", headers=H).text)
 ```
 
 ---
@@ -184,13 +137,13 @@ print(httpx.get(f"{BASE}/transcriptions/{tid}/markdown", headers=H).text)
 ## Workflow Summary
 
 1. **Resolve key** (file or env)
-2. **POST /upload** with file + options → get `task_id`
-3. **Poll /status** until `completed` or `failed`
-4. **GET /transcriptions/{id}** (JSON) or `.../markdown` (human-readable)
+2. Upload is **blocked** until a live remaining-quota endpoint and schema are verified. Use the existing-job resume flow only.
+3. **Poll /status** with a deadline; stop on `failed` or unknown status
+4. **GET /transcriptions/{id}** only after `completed` before the deadline
 
 ## Cost & Limits
 
-- Counted in **transcriptions per day** (1/day free; starter 50/day; pro 200/day).
+- Counted in **transcriptions**, separate from chat. No live remaining-quota endpoint is verified here; Starter upload is `blocked`, regardless of advertised daily ceilings.
 - Only the `POST /upload` call consumes a transcription credit.
 - Status polling and result fetching do **not** consume credits.
 
@@ -199,7 +152,7 @@ print(httpx.get(f"{BASE}/transcriptions/{tid}/markdown", headers=H).text)
 - `401 Unauthorized` — invalid key → re-run `coddy providers login neuraldeep`
 - `429` — daily limit reached → include `Retry-After` header
 - Large files: keep a generous polling timeout; queue processing is GPU-backed.
-- If `failed`, retry with the same options or contact support with `task_id`.
+- If `failed`, report failure with the private provider ID. A new upload requires a new explicit decision; never retry blindly.
 
 ## Privacy & Security
 

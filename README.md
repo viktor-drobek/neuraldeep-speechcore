@@ -21,14 +21,25 @@ npx skillsbd add https://github.com/viktor-drobek/neuraldeep-speechcore --skill 
 ## Requirements
 
 - A NeuralDeep API key (`sk-...`). The skill reads it from
-  `~/.coddy/providers/neuraldeep/neuraldeep-auth.json` (field `api_key`), or
-  falls back to the `NEURALDEEP_API_KEY` environment variable.
+  `${CODDY_HOME:-~/.coddy}/providers/neuraldeep/neuraldeep-auth.json` (field `api_key`),
+  falling back to `NEURALDEEP_API_KEY` when the file/key is missing, null, empty, or malformed.
+- Python 3.10+ (standard library only).
 - Get a key at <https://neuraldeep.ru> (Hub) or via `coddy providers login neuraldeep`.
 
 ## Usage
 
 See [`SKILL.md`](./SKILL.md) for the full API reference, endpoints, request/response
 shapes, and worked examples.
+
+## Starter guard and Relay handoff
+
+See [STARTER_RELAY.md](./STARTER_RELAY.md) for guarded commands, private job
+state, timeout recovery, and the optional artifact-based Relay envelope.
+The helper checks live service quota rather than hard-coding daily limits.
+SpeechCore upload is blocked until a remaining-quota endpoint is verified;
+resuming existing jobs remains read-only.
+
+Run offline tests: `python3 -B -m unittest discover -s tests`.
 
 ## License
 
