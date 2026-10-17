@@ -2,8 +2,10 @@
 name: neuraldeep-speechcore
 description: >
   Transcription skill powered by NeuralDeep SpeechCore API.
-  Transcribes long audio/video (up to ~6 hours), supports diarization, speaker labels,
-  hotwords, custom prompts, and export to SRT/VTT/DOCX/PDF.
+  The guarded helper resumes existing transcription jobs and saves validated
+  transcript JSON with timestamps and speaker labels. New uploads are blocked
+  until a remaining-quota endpoint is verified. SRT/VTT/DOCX/PDF exports are
+  produced locally from the saved segments.
   Automatically activates when user asks for transcription, STT, audio-to-text,
   meeting analysis, or podcast processing.
 metadata:

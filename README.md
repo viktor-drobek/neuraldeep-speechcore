@@ -1,6 +1,7 @@
 # 🎙️ neuraldeep-speechcore
 
-Transcription of long audio/video (up to ~6 hours) with diarization, speaker labels, hotwords, and export to SRT/VTT/DOCX/PDF.
+Resume existing transcription jobs and save validated transcript JSON with timestamps and speaker labels.
+New uploads are blocked until a remaining-quota endpoint is verified; SRT/VTT/DOCX/PDF exports are produced locally from the saved segments.
 
 A [Coddy](https://coddy.dev) / AI-agent skill for the **NeuralDeep SpeechCore API**.
 
