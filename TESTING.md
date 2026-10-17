@@ -68,3 +68,11 @@ ID fields. The last test failed because a SpeechCore upload response's
 `task_id` was read as `id`; the helper now maps `task_uid`/`id`/`task_id` per
 service. `python3 -B -m unittest discover -s tests`: **26 tests passed**.
 Uploads remain blocked; the job-ID test patches the submission step.
+
+## HTTPError response closing
+
+Added `test_http_error_response_is_closed` first; it failed because
+`request()` raised `RequestError` without closing the caught `HTTPError`, which
+left its response open (a `ResourceWarning` under Python 3.14). `request()` now
+closes it, matching neuraldeep-search cbb6fc3. **27 tests passed**, with no
+`ResourceWarning`.

@@ -101,6 +101,16 @@ class SafetyTests(unittest.TestCase):
             self.assertNotIn("secret-fixture", str(raised.exception))
             self.assertEqual(opener.open.call_count, 1)
 
+    def test_http_error_response_is_closed(self):
+        import io
+        from urllib.error import HTTPError
+        body = io.BytesIO(b"private-body-fixture")
+        opener = Mock()
+        opener.open.side_effect = HTTPError("https://example.com", 503, "Unavailable", {}, body)
+        with self.assertRaises(client.RequestError):
+            client.request("GET", client.HUB + "/limits", "secret-fixture", opener=opener)
+        self.assertTrue(body.closed)
+
     def test_durable_state_and_duplicate_prevention(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "job.json"

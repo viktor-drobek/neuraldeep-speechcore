@@ -79,6 +79,7 @@ def request(method, url, key, body=None, content_type="application/json", *, tim
             media_type = response.headers.get("Content-Type", "").split(";", 1)[0].strip().lower()
         return (data, media_type) if raw else json.loads(data)
     except HTTPError as error:
+        error.close()
         raise RequestError(f"HTTP {error.code}; no automatic retry") from None
     except (URLError, TimeoutError, OSError, ValueError, HTTPException):
         raise RequestError("Transport or response error; no automatic retry") from None
