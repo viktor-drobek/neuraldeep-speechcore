@@ -13,7 +13,7 @@ No billed endpoint was called during development or verification. Publication is
    preflight HTTP error was mislabeled `poll_error` instead of `blocked`.
 4. Fixed both branches. Added the fenced-example syntax test before creating
    `STARTER_RELAY.md`; it failed because that required guide did not exist.
-5. Created the guide and reran the full suite. Final results are reported below
+5. Created the guide and reran the full suite. Initial results are reported below
    only after execution; no live submission/result is claimed by offline tests.
 
 ## Coverage
@@ -37,7 +37,10 @@ A further regression test exposed a CLI catch-all that hid sanitized block
 reasons; it was fixed. A mocked workflow test covers all five image operations
 as asynchronous jobs, including multipart processing rather than direct PNG POSTs.
 
-## Final results
+## Initial results
+
+These are the results of the first release; later sections record each change
+and the current test count.
 
 - `python3 -B -m unittest discover -s tests`: **22 tests passed** in this repo.
   The identical shared suite passed in all four service repos (88 total).
@@ -134,3 +137,26 @@ now also asserts the saved state file is byte-for-byte unchanged. Without it, a
 guard moved inside `execute()`'s `try:` block passed all 40 tests while rewriting
 the hand-edited state to `blocked`; that mutant now fails for all three statuses.
 The suite stays at **40 tests**.
+
+## Crossreview fixes
+
+A crossreview of today's changes found four low-severity issues; each fix below
+was preceded by a failing test where one applies.
+
+- `resume` of a malformed state file (`[]`, `null`, a string, a non-string
+  `status`, or non-list `errors`) crashed with an uncaught `TypeError` or
+  `AttributeError`; the last case polled the provider first. It now blocks with
+  "State is not resumable" before any request and leaves the file untouched.
+  `test_resume_of_malformed_state_is_blocked_not_crashed` failed for all five
+  cases first.
+- The SKILL.md Python example read the transcript and the CLI output with the
+  locale encoding. Both now pass `encoding="utf-8"`, and
+  `test_python_examples_use_explicit_text_encoding` (which failed first) checks
+  every fenced Python example.
+- SKILL.md labelled the API's `/status` response as the helper's output; it now
+  says the helper polls it and describes the JSON envelope the helper prints.
+- "Final results" above is renamed "Initial results", since its 22-test count
+  is from the first release.
+
+**42 tests passed**, both normally and with `LC_ALL=C PYTHONUTF8=0`, with no
+`EncodingWarning`.

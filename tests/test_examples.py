@@ -38,6 +38,22 @@ class ExampleTests(unittest.TestCase):
             client.main()
         self.assertEqual(execute.call_args.args[0].timeout, int(timeout[1]))
 
+    def test_python_examples_use_explicit_text_encoding(self):
+        # Copied examples must not depend on the locale encoding either.
+        root = Path(__file__).parents[1]
+        for name in ("README.md", "SKILL.md", "STARTER_RELAY.md"):
+            text = (root / name).read_text(encoding="utf-8")
+            for number, match in enumerate(re.finditer(r"```python\n(.*?)```", text, re.S)):
+                for node in ast.walk(ast.parse(match[1])):
+                    if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
+                        continue
+                    keywords = {k.arg for k in node.keywords}
+                    text_mode = node.func.attr in ("read_text", "write_text") or (
+                        node.func.attr == "run" and "text" in keywords)
+                    with self.subTest(file=name, block=number, call=node.func.attr, line=node.lineno):
+                        if text_mode:
+                            self.assertIn("encoding", keywords)
+
 
 if __name__ == "__main__":
     unittest.main()
