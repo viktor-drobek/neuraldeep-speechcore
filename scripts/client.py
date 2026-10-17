@@ -23,6 +23,8 @@ QUOTAS = {"search": "/search/quota", "ocr": "/ocr/balance", "images": "/images/q
 OPERATIONS = {"search": ("web", "tg", "crawl"), "ocr": ("extract",),
               "images": ("generate", "upscale", "background/remove", "enhance", "avatar"),
               "speechcore": ("upload",)}
+# Services that answer the submission directly, without a provider job to resume.
+SYNCHRONOUS = {"search"}
 # Field holding the provider job ID in each async submission response.
 JOB_ID_FIELDS = {"images": "task_uid", "ocr": "id", "speechcore": "task_id"}
 # Documented in SKILL.md; tests keep the two in sync.
@@ -254,7 +256,7 @@ def job_urls(service, job_id):
     if service == "speechcore":
         url = SPEECH + "/transcriptions/" + quote(job_id)
         return url + "/status", url, "completed"
-    raise JobError("Synchronous search has no resumable job endpoint")
+    raise JobError(f"Synchronous {service} has no resumable job endpoint")
 
 
 def multipart(path, field, fields):
@@ -299,6 +301,8 @@ def execute(args):
     if Path(args.state).resolve() == Path(args.output).resolve():
         raise Blocked("State and artifact paths must differ")
     if args.command == "resume":
+        if SERVICE in SYNCHRONOUS:
+            raise Blocked(f"Synchronous {SERVICE} has no resumable job endpoint")
         if args.job_id:
             job_urls(SERVICE, args.job_id)
             state = new_state(args.state, args.task_id, SERVICE)
@@ -333,7 +337,7 @@ def execute(args):
                 job_urls(SERVICE, state["provider_job_id"])
                 state["status"] = "submitted"
                 save_state(args.state, state)
-        if SERVICE != "search":
+        if SERVICE not in SYNCHRONOUS:
             status_url, result_url, success = job_urls(SERVICE, state["provider_job_id"])
             data = poll(lambda url, **kw: request("GET", url, key, **kw),
                         status_url, result_url, success, timeout=args.timeout)

@@ -117,3 +117,14 @@ targeted mutation of `client.py` in a scratch copy, which it caught. The images
 CI workflow (`.github/workflows/tests.yml`: offline suite and `--help` on Python
 3.10 and 3.x, with no credential in the environment) was copied unchanged; the
 suite is now **39 tests**.
+
+## Synchronous resume
+
+Ported from neuraldeep-search ac7260d. `test_resume_of_edited_resumable_state_is_blocked_not_crashed`
+was added first and failed with an uncaught `UnboundLocalError` for `submitted`,
+`timed_out` and `poll_error`: with `SERVICE` patched to `search`, `resume` of a
+hand-edited state skipped polling and saved an artifact from unassigned data.
+A `SYNCHRONOUS` service set now blocks `resume` for such services before any state
+is read. SpeechCore itself is asynchronous; the change keeps the shared helper
+identical to search apart from `SERVICE`. **40 tests passed**, both normally and
+with `LC_ALL=C PYTHONUTF8=0`, with no `EncodingWarning`.
