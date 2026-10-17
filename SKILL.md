@@ -109,7 +109,9 @@ python3 scripts/client.py resume --job-id PROVIDER_JOB_ID --state speech-state.j
 {"status": "completed", "progress": 100}
 ```
 
-**Polling interval:** check every 2–5 seconds. Keep a reasonable timeout (upload to ~6h recordings may take a while).
+**Polling interval:** the helper checks status every 2 seconds until its polling
+deadline; `--timeout` defaults to 120 seconds. Examples that pass `--timeout 1200`
+extend that deadline for long recordings (up to ~6h of audio may take a while).
 
 ---
 

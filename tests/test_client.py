@@ -367,6 +367,17 @@ class SafetyTests(unittest.TestCase):
                 req.assert_not_called()
                 self.assertEqual(state.read_text(), '{"provider_job_id": "job-fixture"}')
 
+    def test_polling_defaults_come_from_shared_constants(self):
+        import inspect
+        import sys
+        self.assertEqual((client.POLL_INTERVAL, client.DEFAULT_TIMEOUT), (2, 120))
+        params = inspect.signature(client.poll).parameters
+        self.assertEqual((params["interval"].default, params["timeout"].default),
+                         (client.POLL_INTERVAL, client.DEFAULT_TIMEOUT))
+        with patch.object(client, "execute", return_value={"status": "ready"}) as execute, patch.object(sys, "argv", ["client.py", "check"]), patch("sys.stdout"):
+            client.main()
+        self.assertEqual(execute.call_args.args[0].timeout, client.DEFAULT_TIMEOUT)
+
 
 if __name__ == "__main__":
     unittest.main()

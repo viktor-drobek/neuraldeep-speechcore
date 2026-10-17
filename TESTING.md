@@ -88,3 +88,13 @@ file already exists" instead of the generic CLI message, makes no HTTP call,
 and leaves the existing file untouched. The updated duplicate-state test and the
 new `test_existing_state_path_is_refused_with_clear_reason` failed first; the
 suite is now **29 tests**.
+
+Ported from neuraldeep-ocr: polling defaults now come from `POLL_INTERVAL = 2`
+and `DEFAULT_TIMEOUT = 120` (used by `poll()` and `--timeout`, which gained help
+text). `test_polling_defaults_come_from_shared_constants` failed first.
+SKILL.md said "check every 2–5 seconds"; it now documents the real 2-second
+interval and 120-second `--timeout` default, and OCR's
+`test_documented_polling_defaults_match_helper` (which failed first) keeps
+them aligned.
+`scripts/client.py` is now identical across all four repos except `SERVICE`;
+the suite is now **31 tests**.
