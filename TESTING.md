@@ -128,3 +128,9 @@ A `SYNCHRONOUS` service set now blocks `resume` for such services before any sta
 is read. SpeechCore itself is asynchronous; the change keeps the shared helper
 identical to search apart from `SERVICE`. **40 tests passed**, both normally and
 with `LC_ALL=C PYTHONUTF8=0`, with no `EncodingWarning`.
+
+Crossreview follow-up: `test_resume_of_edited_resumable_state_is_blocked_not_crashed`
+now also asserts the saved state file is byte-for-byte unchanged. Without it, a
+guard moved inside `execute()`'s `try:` block passed all 40 tests while rewriting
+the hand-edited state to `blocked`; that mutant now fails for all three statuses.
+The suite stays at **40 tests**.
