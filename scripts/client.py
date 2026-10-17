@@ -317,6 +317,10 @@ def execute(args):
             save_state(args.state, state)
         else:
             state = json.loads(Path(args.state).read_text(encoding="utf-8"))
+        # A hand-edited or corrupted state must block, not crash or poll.
+        if (not isinstance(state, dict) or not isinstance(state.get("status"), str)
+                or not isinstance(state.get("errors"), list)):
+            raise Blocked("State is not resumable; reconcile without submitting again")
         if state["service"] != SERVICE or state["status"] not in {"submitted", "timed_out", "poll_error"}:
             raise Blocked("State is not resumable; reconcile without submitting again")
     else:

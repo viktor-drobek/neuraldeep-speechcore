@@ -588,6 +588,25 @@ class SafetyTests(unittest.TestCase):
                 self.assertFalse(output.exists())
                 self.assertEqual(state.read_bytes(), before)
 
+    def test_resume_of_malformed_state_is_blocked_not_crashed(self):
+        import io
+        import sys
+        cases = ["[]", "null", '"x"', '{"service": "speechcore", "status": []}',
+                 '{"service": "speechcore", "status": "submitted", "provider_job_id": "job-fixture", "errors": "x"}']
+        for text in cases:
+            with self.subTest(state=text), tempfile.TemporaryDirectory() as tmp, patch.object(client, "resolve_key", return_value="fixture"):
+                state, output = Path(tmp) / "state.json", Path(tmp) / "result.json"
+                state.write_text(text, encoding="utf-8")
+                argv = ["client.py", "resume", "--state", str(state), "--output", str(output)]
+                with patch.object(client, "SERVICE", "speechcore"), patch.object(client, "request") as req, patch.object(sys, "argv", argv), patch("sys.stdout", new_callable=io.StringIO) as out:
+                    self.assertEqual(client.main(), 1)
+                result = json.loads(out.getvalue())
+                self.assertEqual(result["status"], "blocked")
+                self.assertIn("not resumable", result["errors"][0])
+                req.assert_not_called()
+                self.assertFalse(output.exists())
+                self.assertEqual(state.read_text(encoding="utf-8"), text)
+
 
 if __name__ == "__main__":
     unittest.main()
