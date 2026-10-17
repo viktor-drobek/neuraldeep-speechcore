@@ -23,6 +23,8 @@ QUOTAS = {"search": "/search/quota", "ocr": "/ocr/balance", "images": "/images/q
 OPERATIONS = {"search": ("web", "tg", "crawl"), "ocr": ("extract",),
               "images": ("generate", "upscale", "background/remove", "enhance", "avatar"),
               "speechcore": ("upload",)}
+# Field holding the provider job ID in each async submission response.
+JOB_ID_FIELDS = {"images": "task_uid", "ocr": "id", "speechcore": "task_id"}
 
 
 class Blocked(RuntimeError):
@@ -318,8 +320,7 @@ def execute(args):
                 data = json.dumps(response, ensure_ascii=False, indent=2).encode()
                 result_url = url.split("?")[0]
             else:
-                field = "task_uid" if SERVICE == "images" else "id"
-                state["provider_job_id"] = response.get(field)
+                state["provider_job_id"] = response.get(JOB_ID_FIELDS[SERVICE])
                 job_urls(SERVICE, state["provider_job_id"])
                 state["status"] = "submitted"
                 save_state(args.state, state)

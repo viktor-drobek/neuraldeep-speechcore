@@ -29,6 +29,20 @@ Use this skill whenever the user needs:
 - Hotword tuning for domain-specific terminology
 - Summarization or chat with transcript content
 
+## What the helper does today
+
+`scripts/client.py` supports two SpeechCore commands:
+
+- `check upload`: read-only preflight. It always exits nonzero with `blocked`,
+  because no live remaining-quota endpoint is verified.
+- `resume`: attaches to an **existing** transcription job, polls its status, and
+  saves the validated transcript JSON from `GET /transcriptions/{id}`.
+
+It does not upload, set upload options (diarization, hotwords, prompts), fetch
+markdown, list transcriptions, or export SRT/VTT/DOCX/PDF. Produce subtitles or
+documents locally from the saved JSON `segments`; the agent, not the API,
+writes summaries and answers questions about the transcript.
+
 ## Requirements
 
 Python 3.10+ is sufficient; the helper uses only the standard library.
@@ -62,7 +76,8 @@ https://speechcore.neuraldeep.ru/api
 python3 scripts/client.py check upload
 ```
 
-**Options (URL query parameters):**
+**Documented API options (URL query parameters).** The helper cannot send them
+while uploads are blocked; they are listed for reference only:
 - `diarize=true` — enable speaker separation (SPEAKER_00, SPEAKER_01…)
 - `diarize_speakers_num=N` — hint number of speakers (1–20, more accurate than auto)
 - `language=ru` — fix language instead of auto-detect
@@ -110,12 +125,11 @@ Use the artifact reference in the returned envelope; never treat a timeout as su
 
 ### Markdown with timestamps
 `GET /transcriptions/{id}/markdown` provides timestamped markdown after completion.
-The minimal helper saves JSON; custom callers can select markdown with the same
-bounded polling primitive.
+The helper does not fetch it; it saves only the JSON result.
 
 ### List your transcriptions
-`GET /transcriptions?limit=20` lists existing transcriptions. This is read-only;
-keep returned IDs and transcript metadata private.
+`GET /transcriptions?limit=20` lists existing transcriptions. This is read-only
+and not wrapped by the helper; keep returned IDs and transcript metadata private.
 
 ---
 
@@ -126,10 +140,15 @@ import json
 from pathlib import Path
 import subprocess
 # Resume an existing job using its durable private state. No upload occurs.
-subprocess.run(["python3", "scripts/client.py", "resume", "--state", "speech-state.json",
-                "--output", "transcript.json", "--timeout", "1200"], check=True)
-data = json.loads(Path("transcript.json").read_text())
-print("lang:", data["detected_language"], "duration:", data["duration"])
+run = subprocess.run(["python3", "scripts/client.py", "resume", "--state", "speech-state.json",
+                      "--output", "transcript.json", "--timeout", "1200"],
+                     capture_output=True, text=True)
+envelope = json.loads(run.stdout)
+if run.returncode != 0 or envelope["status"] != "completed":
+    raise SystemExit(f"not completed: {envelope['status']} {envelope['errors']}")
+data = json.loads(Path(envelope["artifacts"][0]["reference"]).read_text())
+# The helper validates duration and segments; detected_language may be absent.
+print("lang:", data.get("detected_language"), "duration:", data["duration"])
 ```
 
 ---
@@ -150,7 +169,8 @@ print("lang:", data["detected_language"], "duration:", data["duration"])
 ## Error Handling
 
 - `401 Unauthorized` — invalid key → re-run `coddy providers login neuraldeep`
-- `429` — daily limit reached → include `Retry-After` header
+- `429` — daily limit reached. The helper reports `HTTP 429` without retrying
+  or reading `Retry-After`; wait and decide explicitly before trying again.
 - Large files: keep a generous polling timeout; queue processing is GPU-backed.
 - If `failed`, report failure with the private provider ID. A new upload requires a new explicit decision; never retry blindly.
 
