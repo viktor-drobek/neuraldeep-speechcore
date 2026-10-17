@@ -165,7 +165,7 @@ print("lang:", data.get("detected_language"), "duration:", data["duration"])
 
 1. **Resolve key** (file or env)
 2. Upload is **blocked** until a live remaining-quota endpoint and schema are verified. Use the existing-job resume flow only.
-3. **Poll /status** with a deadline; stop on `failed` or unknown status
+3. **Poll /status** with a deadline; stop on an explicit failure status, and keep polling through unrecognized ones until the deadline
 4. **GET /transcriptions/{id}** only after `completed` before the deadline
 
 ## Cost & Limits

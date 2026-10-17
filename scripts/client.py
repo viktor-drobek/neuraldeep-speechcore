@@ -30,6 +30,9 @@ JOB_ID_FIELDS = {"images": "task_uid", "ocr": "id", "speechcore": "task_id"}
 # Documented in SKILL.md; tests keep the two in sync.
 POLL_INTERVAL = 2
 DEFAULT_TIMEOUT = 120
+# Explicit terminal failures. Any other unrecognized status keeps polling until the
+# deadline: providers report intermediate states outside any fixed list.
+FAILED_STATUSES = {"failed", "cancelled", "canceled", "error", "expired", "rejected"}
 
 
 class Blocked(RuntimeError):
@@ -231,11 +234,17 @@ def validate_result(service, response):
 
 def poll(get, status_url, result_url, success, *, timeout=DEFAULT_TIMEOUT, interval=POLL_INTERVAL):
     deadline = time.monotonic() + timeout
+    last = None
     while True:
         remaining = deadline - time.monotonic()
         if remaining <= 0:
-            raise PollTimeout("Polling deadline reached; resume the same provider job")
-        status = get(status_url, timeout=min(30, remaining)).get("status")
+            # Name the last status only when it is a plain word; never echo provider text.
+            seen = "" if last is None else f"; last status {last!r}" if re.fullmatch(r"[a-z_]{1,32}", last) else "; last status unrecognized"
+            raise PollTimeout(f"Polling deadline reached{seen}; resume the same provider job")
+        response = get(status_url, timeout=min(30, remaining))
+        status = response.get("status") if isinstance(response, dict) else None
+        if not isinstance(status, str):
+            raise RequestError("Status response has no status; resume the same provider job")
         if time.monotonic() >= deadline:
             raise PollTimeout("Polling deadline reached; result not fetched")
         if status == success:
@@ -243,8 +252,9 @@ def poll(get, status_url, result_url, success, *, timeout=DEFAULT_TIMEOUT, inter
             if remaining <= 0:
                 raise PollTimeout("Polling deadline reached; result not fetched")
             return get(result_url, timeout=min(30, remaining), raw=True)
-        if status not in {"pending", "queued", "processing", "running", "in_progress"}:
-            raise JobError("Provider job failed, cancelled, or returned an unknown status")
+        if status in FAILED_STATUSES:
+            raise JobError(f"Provider job ended with status {status!r}")
+        last = status
         time.sleep(min(interval, max(0, deadline - time.monotonic())))
 
 

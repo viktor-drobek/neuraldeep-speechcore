@@ -79,7 +79,7 @@ class SafetyTests(unittest.TestCase):
         self.assertEqual(client.price_id("whisper", "transcribe"), "whisper-1")
 
     def test_poll_failure_and_deadline_never_fetch(self):
-        for status in ("failed", "cancelled", "unknown"):
+        for status in ("failed", "cancelled", "error"):
             get = Mock(return_value={"status": status})
             with self.assertRaises(client.JobError):
                 client.poll(get, "/status", "/result", "completed", timeout=10)
@@ -88,6 +88,69 @@ class SafetyTests(unittest.TestCase):
         with self.assertRaises(client.PollTimeout):
             client.poll(get, "/status", "/result", "completed", timeout=0)
         get.assert_not_called()
+
+    def fake_clock(self):
+        # sleep() advances a fake monotonic clock, so deadline loops end fast.
+        now = [0.0]
+        return (patch.object(client.time, "monotonic", side_effect=lambda: now[0]),
+                patch.object(client.time, "sleep", side_effect=lambda s: now.__setitem__(0, now[0] + max(s, 1))))
+
+    def test_unknown_intermediate_status_keeps_polling(self):
+        # On 2026-10-17 live OCR jobs answered a status outside the known set before
+        # "completed"; the helper marked finished jobs failed.
+        get = Mock(side_effect=[{"status": "uploaded"}, {"status": "completed"}, b"artifact"])
+        clock, sleep = self.fake_clock()
+        with clock, sleep:
+            self.assertEqual(client.poll(get, "/status", "/result", "completed", timeout=10), b"artifact")
+        self.assertEqual([c.args[0] for c in get.call_args_list], ["/status", "/status", "/result"])
+
+    def test_unknown_status_until_deadline_times_out_and_names_it(self):
+        get = Mock(return_value={"status": "uploaded"})
+        clock, sleep = self.fake_clock()
+        with clock, sleep, self.assertRaises(client.PollTimeout) as raised:
+            client.poll(get, "/status", "/result", "completed", timeout=10)
+        self.assertIn("last status 'uploaded'", str(raised.exception))
+        self.assertGreater(get.call_count, 1)
+        self.assertTrue(all(c.args[0] == "/status" for c in get.call_args_list))
+
+    def test_explicit_failure_statuses_stop_without_fetch(self):
+        for status in ("failed", "cancelled", "canceled", "error", "expired", "rejected"):
+            with self.subTest(status=status):
+                get = Mock(return_value={"status": status})
+                with self.assertRaises(client.JobError) as raised:
+                    client.poll(get, "/status", "/result", "completed", timeout=10)
+                self.assertIn(repr(status), str(raised.exception))
+                self.assertEqual(get.call_count, 1)
+
+    def test_missing_or_malformed_status_is_a_resumable_poll_error(self):
+        for response in ({}, {"status": None}, {"status": 3}, [], "completed"):
+            with self.subTest(response=response):
+                get = Mock(return_value=response)
+                with self.assertRaises(client.RequestError):
+                    client.poll(get, "/status", "/result", "completed", timeout=10)
+                self.assertEqual(get.call_count, 1)
+
+    def test_unrecognized_status_text_is_not_echoed(self):
+        get = Mock(return_value={"status": "Bearer secret-fixture\nX-Evil: 1"})
+        clock, sleep = self.fake_clock()
+        with clock, sleep, self.assertRaises(client.PollTimeout) as raised:
+            client.poll(get, "/status", "/result", "completed", timeout=10)
+        self.assertIn("last status unrecognized", str(raised.exception))
+        self.assertNotIn("secret-fixture", str(raised.exception))
+
+    def test_ocr_run_completes_through_unknown_intermediate_status(self):
+        with tempfile.TemporaryDirectory() as tmp, patch.object(client, "SERVICE", "ocr"), patch.object(client, "resolve_key", return_value="fixture"), patch.object(client, "preflight", return_value={}), patch.object(client.time, "sleep"):
+            args = self.args(tmp)
+            args.operation, args.file = "extract", str(Path(tmp) / "invoice.pdf")
+            Path(args.file).write_bytes(b"%PDF-1.4 fixture")
+            content = json.dumps({"content": "# Invoice 4812"}).encode()
+            responses = [{"id": "job-fixture"}, {"status": "uploaded"}, {"status": "completed"}, (content, "application/json")]
+            with patch.object(client, "request", side_effect=responses) as req:
+                result = client.execute(args)
+            self.assertEqual(result["status"], "completed")
+            self.assertEqual(result["provider_job_id"], "job-fixture")
+            self.assertEqual(Path(args.output).read_bytes(), content)
+            self.assertEqual([c.args[0] for c in req.call_args_list], ["POST", "GET", "GET", "GET"])
 
     def test_poll_success_and_late_completion(self):
         get = Mock(side_effect=[{"status": "completed"}, b"artifact"])

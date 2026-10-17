@@ -69,8 +69,11 @@ after receiving a valid response. Keep that ID until the work is reconciled.
 On `timed_out` or `poll_error`, use `resume --state STATE --output RESULT`.
 Resume only reads the existing job; it never submits again. `resume --job-id ID`
 can attach an existing async job to a new private state file. Do not run multiple
-resumers against one state file. Failed, cancelled, and unknown statuses stop
-without fetching a result; a completion observed after the deadline also stops.
+resumers against one state file. Explicit failure statuses (`failed`, `cancelled`,
+`canceled`, `error`, `expired`, `rejected`) stop without fetching a result. Any
+other unrecognized status keeps polling until the deadline, then ends `timed_out`
+and names the last status, so the same job can be resumed. A response without a
+status is a `poll_error`, and a completion observed after the deadline also stops.
 
 An ambiguous POST timeout, HTTP failure, malformed response, or interrupted
 submission is `reconciliation_required`, **not permission to resubmit**. Search
