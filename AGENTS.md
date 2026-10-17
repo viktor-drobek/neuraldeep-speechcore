@@ -71,6 +71,41 @@ The helper reads `api_key` from
 back to `NEURALDEEP_API_KEY`. Never print, log or commit either. Coddy users sign
 in with `coddy providers login neuraldeep`.
 
+## Delivery workflow
+
+Work RED-GREEN-REFACTOR: start a feature with a test that describes the observable result and a
+bug fix with a regression test, watch it fail for the intended reason, make the smallest change
+that passes, and refactor only with the suite green. Then run the full offline matrix above.
+
+Inside `scripts/client.py`, implement from lower dependencies upward: constants and parsing,
+credentials and approved-origin transport, the fail-closed guard, durable state and artifacts,
+provider jobs and polling, then `execute()` and the CLI. Lower layers must not depend on CLI
+parsing or provider job state.
+
+Update `README.md`, `SKILL.md`, `STARTER_RELAY.md` and `TESTING.md` in the same change when
+behavior, CLI output, safety assumptions or documented shapes change.
+
+## Rules Sync
+
+This file is the common policy for every agent, and `CLAUDE.md` is a symlink to it. Scoped detail
+lives in native rules with identical bodies:
+
+| Rule | Scope | Cursor | Claude Code |
+|---|---|---|---|
+| `workflow` | always on | `.cursor/rules/workflow.mdc` | `.claude/rules/workflow.md` |
+| `client` | `scripts/**/*.py`, `tests/test_client.py` | `.cursor/rules/client.mdc` | `.claude/rules/client.md` |
+| `documentation` | `README.md`, `SKILL.md`, `STARTER_RELAY.md`, `TESTING.md`, `tests/test_examples.py` | `.cursor/rules/documentation.mdc` | `.claude/rules/documentation.md` |
+
+- Cursor reads `.cursor/rules/`; Claude Code reads `CLAUDE.md` and `.claude/rules/`.
+- Codex reads this file, and the project hook in `.codex/hooks.json` with
+  `.codex/hooks/attach_rules.py` attaches the Cursor rules: always-on rules at session start,
+  scoped rules before an edit to a matching file. Run `/hooks` in Codex once per clone and again
+  after changing either hook file. The hook is a fail-open convenience, not a security boundary;
+  the safety rules here, the helper and the tests still enforce them.
+- Never copy rule bodies under `.codex` or create `.codex/rules.md`.
+- Change a rule and its counterpart together. `tests/test_agent_rules.py` checks the pairing, the
+  scopes and the hook; it and `.codex/hooks/` are identical across the neuraldeep-* repositories.
+
 ## Git and PRs
 
 - Work on a branch and open a PR against `main`; do not push to `main`. Merging is

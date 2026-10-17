@@ -210,3 +210,21 @@ the key, never call the API directly, never hand-write state, never probe
 undocumented endpoints, and keep the answer when a supervisor says the task is not
 done. The description says so too. The documentation test for it failed first.
 **52 tests passed**, both normally and with `LC_ALL=C PYTHONUTF8=0`.
+
+## Agent rule surfaces
+
+Added `tests/test_agent_rules.py` (10 tests) before any rule file existed; all
+10 failed because `.codex/hooks/attach_rules.py`, the rules and `CLAUDE.md` were
+missing. Then added Cursor rules (`.cursor/rules/*.mdc`), their Claude Code
+mirrors with identical bodies (`.claude/rules/*.md`), the Codex hook that attaches
+the Cursor rules (`.codex/hooks.json`, `.codex/hooks/attach_rules.py`),
+`CLAUDE.md` as a symlink to `AGENTS.md`, and the Delivery workflow and Rules Sync
+sections in `AGENTS.md`. The tests check the pairing and scope mapping, that
+every glob matches a file, and the hook itself: always-on rules at session start,
+the client rule once per session for patch add, update, delete and rename and for
+`Edit` and `Write`, and fail-open on bad input. Eight mutations (a widened or
+narrowed scope, `paths` differing from `globs`, body drift, a missing mirror, a
+dead glob, `.codex/rules.md`, a copied `CLAUDE.md`) each failed a test. The test
+file and `.codex/hooks/` are identical across the neuraldeep-* repositories.
+**62 tests passed**, both normally and with `LC_ALL=C PYTHONUTF8=0`, with no
+`EncodingWarning` under `-X warn_default_encoding`.
