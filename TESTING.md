@@ -82,3 +82,9 @@ file extension (`\.[A-Za-z0-9]{1,10}`) in the `filename=` header, so local
 names with quotes, `;` or line breaks cannot inject header text. The
 regression `test_multipart_filename_cannot_inject_headers` failed first
 (4 injection cases); the suite is now **28 tests**.
+
+Ported from neuraldeep-ocr: a reused `--state` path now blocks with "State
+file already exists" instead of the generic CLI message, makes no HTTP call,
+and leaves the existing file untouched. The updated duplicate-state test and the
+new `test_existing_state_path_is_refused_with_clear_reason` failed first; the
+suite is now **29 tests**.

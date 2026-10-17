@@ -118,8 +118,10 @@ class SafetyTests(unittest.TestCase):
             state["provider_job_id"] = "provider-fixture"
             client.save_state(path, state)
             self.assertEqual(json.loads(path.read_text())["provider_job_id"], "provider-fixture")
-            with self.assertRaises(FileExistsError):
+            with self.assertRaises(client.Blocked) as raised:
                 client.new_state(path, "task-fixture", "images")
+            self.assertIn("State file already exists", str(raised.exception))
+            self.assertEqual(json.loads(path.read_text())["provider_job_id"], "provider-fixture")
 
     def test_deadline_rechecked_before_download(self):
         get = Mock(return_value={"status": "completed"})
@@ -344,6 +346,26 @@ class SafetyTests(unittest.TestCase):
                 self.assertEqual(head.split("\r\n"), [f'Content-Disposition: form-data; name="image"; filename="{expected}"',
                                                       "Content-Type: application/octet-stream"])
                 self.assertNotIn(b"X-Evil", body)
+
+    def test_existing_state_path_is_refused_with_clear_reason(self):
+        import io
+        import sys
+        cases = [["run", client.OPERATIONS[client.SERVICE][0]]]
+        if client.SERVICE != "search":
+            # Synchronous search refuses --job-id before opening any state file.
+            cases.append(["resume", "--job-id", "job-other"])
+        with tempfile.TemporaryDirectory() as tmp, patch.object(client, "resolve_key", return_value="fixture"):
+            state = Path(tmp) / "state.json"
+            state.write_text('{"provider_job_id": "job-fixture"}')
+            paths = ["--state", str(state), "--output", str(Path(tmp) / "result.json")]
+            for argv in cases:
+                with self.subTest(argv=argv), patch.object(client, "request") as req, patch.object(sys, "argv", ["client.py", *argv, *paths]), patch("sys.stdout", new_callable=io.StringIO) as out:
+                    self.assertEqual(client.main(), 1)
+                result = json.loads(out.getvalue())
+                self.assertEqual(result["status"], "blocked")
+                self.assertIn("State file already exists", result["errors"][0])
+                req.assert_not_called()
+                self.assertEqual(state.read_text(), '{"provider_job_id": "job-fixture"}')
 
 
 if __name__ == "__main__":

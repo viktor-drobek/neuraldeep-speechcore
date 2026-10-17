@@ -166,7 +166,10 @@ def state_template(task_id, service):
 
 
 def new_state(path, task_id, service):
-    fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    try:
+        fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    except FileExistsError:
+        raise Blocked("State file already exists; keep it for reconciliation and choose a new private state path") from None
     os.close(fd)
     state = state_template(task_id, service)
     save_state(path, state)
