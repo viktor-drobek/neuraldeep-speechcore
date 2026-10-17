@@ -17,18 +17,18 @@ class ExampleTests(unittest.TestCase):
     def test_fenced_examples_parse_without_execution(self):
         root = Path(__file__).parents[1]
         for name in ("README.md", "SKILL.md", "STARTER_RELAY.md"):
-            text = (root / name).read_text()
+            text = (root / name).read_text(encoding="utf-8")
             for number, match in enumerate(re.finditer(r"```(python|bash)\n(.*?)```", text, re.S)):
                 with self.subTest(file=name, block=number):
                     if match[1] == "python":
                         ast.parse(match[2])
                     else:
-                        subprocess.run(["bash", "-n"], input=match[2], text=True, check=True, capture_output=True)
+                        subprocess.run(["bash", "-n"], input=match[2], text=True, check=True, capture_output=True, encoding="utf-8")
             self.assertNotIn("ND_KEY=$(jq", text)
             self.assertNotIn("# 3. Fetch data =", text)
 
     def test_documented_polling_defaults_match_helper(self):
-        text = (Path(__file__).parents[1] / "SKILL.md").read_text()
+        text = (Path(__file__).parents[1] / "SKILL.md").read_text(encoding="utf-8")
         interval = re.search(r"\*\*Polling interval:\*\* the helper checks status every (\d+) seconds", text)
         timeout = re.search(r"`--timeout` defaults to (\d+) seconds", text)
         self.assertIsNotNone(interval)

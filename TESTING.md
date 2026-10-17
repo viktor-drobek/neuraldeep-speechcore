@@ -98,3 +98,13 @@ interval and 120-second `--timeout` default, and OCR's
 them aligned.
 `scripts/client.py` is now identical across all four repos except `SERVICE`;
 the suite is now **31 tests**.
+
+## UTF-8 file reads
+
+Added `test_text_files_are_read_as_utf8_on_non_utf8_locales` first. It runs the
+helper in a C locale, whose default text encoding is ASCII, and failed: an auth
+file with a non-ASCII field was reported as having no credential, and a UTF-8
+`--payload` or state file raised `UnicodeDecodeError`. The helper and tests now
+read and write text as UTF-8 explicitly. **32 tests passed**, both normally and
+with `LC_ALL=C PYTHONUTF8=0`, with no `EncodingWarning` under
+`-X warn_default_encoding`.

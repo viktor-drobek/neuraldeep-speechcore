@@ -49,7 +49,7 @@ class PollTimeout(JobError):
 def resolve_key():
     home = Path(os.environ.get("CODDY_HOME") or Path.home() / ".coddy").expanduser()
     try:
-        auth = json.loads((home / "providers/neuraldeep/neuraldeep-auth.json").read_text())
+        auth = json.loads((home / "providers/neuraldeep/neuraldeep-auth.json").read_text(encoding="utf-8"))
         key = auth.get("api_key") if isinstance(auth, dict) else None
     except (OSError, ValueError):
         key = None
@@ -272,7 +272,7 @@ def multipart(path, field, fields):
 def submission(args):
     if SERVICE == "speechcore":
         raise Blocked("SpeechCore uploads disabled until remaining quota is verified")
-    payload = json.loads(Path(args.payload).read_text()) if args.payload else {}
+    payload = json.loads(Path(args.payload).read_text(encoding="utf-8")) if args.payload else {}
     if not isinstance(payload, dict):
         raise Blocked("Payload must be a JSON object")
     url = HUB + "/" + SERVICE + "/" + args.operation
@@ -306,7 +306,7 @@ def execute(args):
             state["status"] = "submitted"
             save_state(args.state, state)
         else:
-            state = json.loads(Path(args.state).read_text())
+            state = json.loads(Path(args.state).read_text(encoding="utf-8"))
         if state["service"] != SERVICE or state["status"] not in {"submitted", "timed_out", "poll_error"}:
             raise Blocked("State is not resumable; reconcile without submitting again")
     else:
