@@ -23,7 +23,7 @@ No billed endpoint was called during development or verification. Publication is
   insufficient service quota, independent chat decision, double-page OCR pro cost.
 - HTTP failures and ambiguous submissions with no retry or secret disclosure.
 - Durable provider ID before polling; duplicate state creation refused.
-- Failed/unknown statuses and deadline exhaustion never fetch results.
+- Failed statuses and deadline exhaustion never fetch results; unknown statuses keep polling.
 - SHA-256 artifact provenance and untrusted-data labeling.
 - Python and Bash fenced examples parsed without execution.
 
@@ -183,3 +183,18 @@ removed from `SYNCHRONOUS`, and `test_whisper_run_is_blocked_before_any_request`
 fails when the `submission()` whisper block is removed; both pass on the real
 code, which is unchanged. **45 tests passed**, both normally and with
 `LC_ALL=C PYTHONUTF8=0`, with no `EncodingWarning`.
+
+## Unknown polling status
+
+A live run on 2026-10-17 (four agents, real API) found that every OCR `run extract`
+ended `failed` with "returned an unknown status", although the job had finished:
+a later `GET /v1/ocr/jobs/{id}` said `completed`, and `resume` fetched the text.
+`poll()` treated any status outside its fixed in-progress list as a failure.
+
+Six tests were added first and failed: an unknown intermediate status now keeps
+polling, an unknown status until the deadline ends `timed_out` naming it (only a
+plain word is echoed), explicit failure statuses still stop at once, a response
+without a status is a resumable `poll_error`, and a mocked OCR run passes through
+an unknown status to `completed`. Mutations of the failure set, the status check
+and the sanitising each fail their own test. **51 tests passed**, both normally
+and with `LC_ALL=C PYTHONUTF8=0`, with no EncodingWarnings.
