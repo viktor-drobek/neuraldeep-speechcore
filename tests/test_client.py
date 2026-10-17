@@ -71,6 +71,13 @@ class SafetyTests(unittest.TestCase):
         with self.assertRaises(client.Blocked):
             client.guard("speechcore", "upload", limits(), {"prices": [{"model": "speechcore", "premium": False}]}, {}, 1)
 
+    def test_whisper_is_blocked_without_verified_quota(self):
+        price = {"prices": [{"model": "whisper-1", "premium": False}]}
+        with self.assertRaises(client.Blocked) as raised:
+            client.guard("whisper", "transcribe", limits(), price, {}, 1)
+        self.assertIn("whisper-1 remaining-quota endpoint unverified", str(raised.exception))
+        self.assertEqual(client.price_id("whisper", "transcribe"), "whisper-1")
+
     def test_poll_failure_and_deadline_never_fetch(self):
         for status in ("failed", "cancelled", "unknown"):
             get = Mock(return_value={"status": status})

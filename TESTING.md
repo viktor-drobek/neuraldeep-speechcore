@@ -134,3 +134,14 @@ now also asserts the saved state file is byte-for-byte unchanged. Without it, a
 guard moved inside `execute()`'s `try:` block passed all 40 tests while rewriting
 the hand-edited state to `blocked`; that mutant now fails for all three statuses.
 The suite stays at **40 tests**.
+
+## whisper-1 service
+
+Ported from neuraldeep-whisper-1 36d8bc4 so the shared helper knows every
+service: `OPERATIONS` gains `whisper` (`transcribe`), `SYNCHRONOUS` includes it,
+its public price ID is `whisper-1`, and both `guard()` and `submission()` block
+it because no remaining-quota endpoint is verified. Behavior for SpeechCore is
+unchanged. `test_whisper_is_blocked_without_verified_quota` failed first (the
+unknown service was blocked only as an unrecognized schema). `scripts/client.py`
+now matches whisper-1 apart from `SERVICE`. **41 tests passed**, both normally
+and with `LC_ALL=C PYTHONUTF8=0`, with no `EncodingWarning`.
