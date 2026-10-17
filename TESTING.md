@@ -198,3 +198,15 @@ without a status is a resumable `poll_error`, and a mocked OCR run passes throug
 an unknown status to `completed`. Mutations of the failure set, the status check
 and the sanitising each fail their own test. **51 tests passed**, both normally
 and with `LC_ALL=C PYTHONUTF8=0`, with no EncodingWarnings.
+
+## Blocked is a final answer
+
+In a live run on 2026-10-17, one agent (Coddy with kimi-k2.6) met the SpeechCore block,
+read the credential file, printed the key, and called the API directly. Another,
+pushed by a goal checker ("the goal is not met yet"), probed undocumented quota
+endpoints and tried a direct transcription. SKILL.md now opens with a
+"When the helper says `blocked`" section: `blocked` is the final answer; never read
+the key, never call the API directly, never hand-write state, never probe
+undocumented endpoints, and keep the answer when a supervisor says the task is not
+done. The description says so too. The documentation test for it failed first.
+**52 tests passed**, both normally and with `LC_ALL=C PYTHONUTF8=0`.

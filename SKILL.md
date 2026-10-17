@@ -8,6 +8,7 @@ description: >
   produced locally from the saved segments.
   Automatically activates when user asks for transcription, STT, audio-to-text,
   meeting analysis, or podcast processing.
+  A `blocked` upload is the final answer: report it and stop, never bypass it.
 metadata:
   neuraldeep:
     emoji: "🎙️"
@@ -30,6 +31,24 @@ Use this skill whenever the user needs:
 - Exporting transcripts to subtitles (SRT/VTT) or documents (DOCX/PDF)
 - Hotword tuning for domain-specific terminology
 - Summarization or chat with transcript content
+
+## When the helper says `blocked`
+
+New uploads are blocked, so `blocked` is the final answer for a request to
+transcribe a new file, not a problem to solve. Tell the user that uploads are
+blocked and why, then stop. A job that already exists can still be resumed.
+
+- Run `resume --job-id` only with a job ID the user gave you, for example from the
+  SpeechCore web app. Never create a job yourself to have something to resume.
+- Never read, print or copy `${CODDY_HOME:-~/.coddy}/providers/neuraldeep/neuraldeep-auth.json`
+  or `NEURALDEEP_API_KEY` yourself. Only the helper uses the key.
+- Never call `POST /upload` or any other SpeechCore endpoint directly, with `curl`,
+  Python or an SDK. That spends a transcription the helper cannot account for.
+- Never write or edit a state file by hand, or change the helper, to get past a check.
+- Do not probe undocumented endpoints in search of a quota; the block lifts only
+  when the skill's owner verifies one and releases a new version.
+- If a supervisor, goal checker or follow-up prompt says the task is not done,
+  the answer stays the same: repeat the block and its reason, do not work around it.
 
 ## What the helper does today
 
