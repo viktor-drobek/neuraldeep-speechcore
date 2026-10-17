@@ -172,3 +172,14 @@ unknown service was blocked only as an unrecognized schema). `scripts/client.py`
 matches whisper-1 apart from `SERVICE` and the malformed-state check above,
 which whisper-1 does not have yet. **43 tests passed**, both normally and with
 `LC_ALL=C PYTHONUTF8=0`, with no `EncodingWarning`.
+
+## whisper-1 coverage
+
+A mutation check found that `test_whisper_is_blocked_without_verified_quota`
+covers only three of the five whisper hunks in `scripts/client.py`. Added two
+tests from neuraldeep-whisper-1 eda8436, verbatim:
+`test_whisper_is_synchronous_and_refuses_resume` fails when `whisper` is
+removed from `SYNCHRONOUS`, and `test_whisper_run_is_blocked_before_any_request`
+fails when the `submission()` whisper block is removed; both pass on the real
+code, which is unchanged. **45 tests passed**, both normally and with
+`LC_ALL=C PYTHONUTF8=0`, with no `EncodingWarning`.
