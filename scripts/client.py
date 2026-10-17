@@ -23,6 +23,9 @@ QUOTAS = {"search": "/search/quota", "ocr": "/ocr/balance", "images": "/images/q
 OPERATIONS = {"search": ("web", "tg", "crawl"), "ocr": ("extract",),
               "images": ("generate", "upscale", "background/remove", "enhance", "avatar"),
               "speechcore": ("upload",), "whisper": ("transcribe",)}
+# Speech-to-text models on /v1/audio/transcriptions; each is its own public price ID.
+TRANSCRIPTION_MODELS = ("gigaam-v3", "whisper-1", "whisper-podlodka-turbo")
+DEFAULT_TRANSCRIPTION_MODEL = "gigaam-v3"
 # Services that answer the submission directly, without a provider job to resume.
 SYNCHRONOUS = {"search", "whisper"}
 # Field holding the provider job ID in each async submission response.
@@ -93,21 +96,27 @@ def request(method, url, key, body=None, content_type="application/json", *, tim
         raise RequestError("Transport or response error; no automatic retry") from None
 
 
-def price_id(service, operation):
+def price_id(service, operation, model=None):
     prefix = "image" if service == "images" else service
-    if service in {"speechcore", "whisper"}:
-        return {"speechcore": "speechcore", "whisper": "whisper-1"}[service]
+    if service == "whisper":
+        return model or DEFAULT_TRANSCRIPTION_MODEL
+    if service == "speechcore":
+        return "speechcore"
     return prefix + ":" + operation.replace("/", "_")
 
 
-def guard(service, operation, limits, prices, quota, units):
+def guard(service, operation, limits, prices, quota, units, model=None):
     try:
         if operation not in OPERATIONS[service]:
             raise Blocked("Unsupported operation")
+        if service == "whisper":
+            model = model or DEFAULT_TRANSCRIPTION_MODEL
+            if model not in TRANSCRIPTION_MODELS:
+                raise Blocked("Unsupported transcription model")
         if (limits["key"]["billing_mode"] != "subscription" or
                 limits["key"]["status"] != "ok" or limits["tier"] != "starter"):
             raise Blocked("Requires an ok key with Starter subscription billing")
-        rows = [p for p in prices["prices"] if p["model"] == price_id(service, operation)]
+        rows = [p for p in prices["prices"] if p["model"] == price_id(service, operation, model)]
         if len(rows) != 1 or rows[0].get("premium") is not False:
             raise Blocked("Operation is not explicitly non-premium in public prices")
         if type(units) is not int or units <= 0:
@@ -115,7 +124,7 @@ def guard(service, operation, limits, prices, quota, units):
         if service == "speechcore":
             raise Blocked("SpeechCore remaining-quota endpoint unverified; uploads disabled")
         if service == "whisper":
-            raise Blocked("whisper-1 remaining-quota endpoint unverified; transcription disabled")
+            raise Blocked(f"{model} remaining-quota endpoint unverified; transcription disabled")
         if quota["tier"] != "starter":
             raise Blocked("Service quota tier differs from Starter")
         if service == "search":
@@ -133,11 +142,11 @@ def guard(service, operation, limits, prices, quota, units):
         raise Blocked("Unrecognized limits, prices, or service quota schema") from None
 
 
-def preflight(service, operation, key, units):
+def preflight(service, operation, key, units, model=None):
     limits = request("GET", HUB + "/limits", key)
     prices = request("GET", PRICES, key)
     quota = request("GET", HUB + QUOTAS[service], key) if service in QUOTAS else {}
-    guard(service, operation, limits, prices, quota, units)
+    guard(service, operation, limits, prices, quota, units, model=model)
     # Persist only relevant quota fields, never the account-wide limits response.
     fields = {"search": ("search", "crawl"), "ocr": ("daily_pages", "monthly_pages"), "images": ("img",)}
     return {"observed_at": now(), "endpoint": HUB + QUOTAS[service],
@@ -289,7 +298,7 @@ def submission(args):
     if SERVICE == "speechcore":
         raise Blocked("SpeechCore uploads disabled until remaining quota is verified")
     if SERVICE == "whisper":
-        raise Blocked("whisper-1 transcription disabled until remaining quota is verified")
+        raise Blocked(f"{getattr(args, 'model', None) or DEFAULT_TRANSCRIPTION_MODEL} transcription disabled until remaining quota is verified")
     payload = json.loads(Path(args.payload).read_text(encoding="utf-8")) if args.payload else {}
     if not isinstance(payload, dict):
         raise Blocked("Payload must be a JSON object")
@@ -313,7 +322,7 @@ def execute(args):
     key = resolve_key()
     units = args.pages * (2 if args.profile == "pro" else 1) if SERVICE == "ocr" else 1
     if args.command == "check":
-        return {"status": "ready", "quota_observed": preflight(SERVICE, args.operation, key, units)}
+        return {"status": "ready", "quota_observed": preflight(SERVICE, args.operation, key, units, model=getattr(args, "model", None))}
     if Path(args.state).resolve() == Path(args.output).resolve():
         raise Blocked("State and artifact paths must differ")
     if args.command == "resume":
@@ -339,7 +348,7 @@ def execute(args):
     try:
         if args.command == "run":
             method, url, body, content_type = submission(args)
-            state["quota_observed"] = preflight(SERVICE, args.operation, key, units)
+            state["quota_observed"] = preflight(SERVICE, args.operation, key, units, model=getattr(args, "model", None))
             # An interruption from here until an ID is persisted requires reconciliation.
             state["status"] = "reconciliation_required"
             save_state(args.state, state)
@@ -387,6 +396,7 @@ def main():
     parser.add_argument("--file", help="Input file for OCR/image processing")
     parser.add_argument("--pages", type=int, default=0, help="Verified OCR input page count; required before upload")
     parser.add_argument("--profile", choices=("fast", "pro"), default="fast")
+    parser.add_argument("--model", choices=TRANSCRIPTION_MODELS, help="Transcription model (default gigaam-v3)")
     parser.add_argument("--state", default="job-state.json", help="Private durable state; must not exist for a new submission")
     parser.add_argument("--output", default="result.bin")
     parser.add_argument("--task-id", default="standalone")
@@ -395,6 +405,8 @@ def main():
     args = parser.parse_args()
     if not math.isfinite(args.timeout) or args.timeout <= 0:
         parser.error("--timeout must be finite and positive")
+    if args.model and SERVICE != "whisper":
+        parser.error("--model applies only to transcription")
     try:
         result = execute(args)
     except (Blocked, RequestError, JobError) as error:
