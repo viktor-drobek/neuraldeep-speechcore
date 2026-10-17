@@ -22,9 +22,9 @@ PRICES = "https://neuraldeep.ru/api/public/wallet-prices"
 QUOTAS = {"search": "/search/quota", "ocr": "/ocr/balance", "images": "/images/quota"}
 OPERATIONS = {"search": ("web", "tg", "crawl"), "ocr": ("extract",),
               "images": ("generate", "upscale", "background/remove", "enhance", "avatar"),
-              "speechcore": ("upload",)}
+              "speechcore": ("upload",), "whisper": ("transcribe",)}
 # Services that answer the submission directly, without a provider job to resume.
-SYNCHRONOUS = {"search"}
+SYNCHRONOUS = {"search", "whisper"}
 # Field holding the provider job ID in each async submission response.
 JOB_ID_FIELDS = {"images": "task_uid", "ocr": "id", "speechcore": "task_id"}
 # Documented in SKILL.md; tests keep the two in sync.
@@ -92,7 +92,9 @@ def request(method, url, key, body=None, content_type="application/json", *, tim
 
 def price_id(service, operation):
     prefix = "image" if service == "images" else service
-    return "speechcore" if service == "speechcore" else prefix + ":" + operation.replace("/", "_")
+    if service in {"speechcore", "whisper"}:
+        return {"speechcore": "speechcore", "whisper": "whisper-1"}[service]
+    return prefix + ":" + operation.replace("/", "_")
 
 
 def guard(service, operation, limits, prices, quota, units):
@@ -109,6 +111,8 @@ def guard(service, operation, limits, prices, quota, units):
             raise Blocked("Positive integer quota cost required")
         if service == "speechcore":
             raise Blocked("SpeechCore remaining-quota endpoint unverified; uploads disabled")
+        if service == "whisper":
+            raise Blocked("whisper-1 remaining-quota endpoint unverified; transcription disabled")
         if quota["tier"] != "starter":
             raise Blocked("Service quota tier differs from Starter")
         if service == "search":
@@ -274,6 +278,8 @@ def multipart(path, field, fields):
 def submission(args):
     if SERVICE == "speechcore":
         raise Blocked("SpeechCore uploads disabled until remaining quota is verified")
+    if SERVICE == "whisper":
+        raise Blocked("whisper-1 transcription disabled until remaining quota is verified")
     payload = json.loads(Path(args.payload).read_text(encoding="utf-8")) if args.payload else {}
     if not isinstance(payload, dict):
         raise Blocked("Payload must be a JSON object")

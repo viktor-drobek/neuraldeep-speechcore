@@ -160,3 +160,15 @@ was preceded by a failing test where one applies.
 
 **42 tests passed**, both normally and with `LC_ALL=C PYTHONUTF8=0`, with no
 `EncodingWarning`.
+
+## whisper-1 service
+
+Ported from neuraldeep-whisper-1 36d8bc4 so the shared helper knows every
+service: `OPERATIONS` gains `whisper` (`transcribe`), `SYNCHRONOUS` includes it,
+its public price ID is `whisper-1`, and both `guard()` and `submission()` block
+it because no remaining-quota endpoint is verified. Behavior for SpeechCore is
+unchanged. `test_whisper_is_blocked_without_verified_quota` failed first (the
+unknown service was blocked only as an unrecognized schema). `scripts/client.py`
+matches whisper-1 apart from `SERVICE` and the malformed-state check above,
+which whisper-1 does not have yet. **43 tests passed**, both normally and with
+`LC_ALL=C PYTHONUTF8=0`, with no `EncodingWarning`.
