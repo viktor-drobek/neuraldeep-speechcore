@@ -102,12 +102,16 @@ while uploads are blocked; they are listed for reference only:
 python3 scripts/client.py resume --job-id PROVIDER_JOB_ID --state speech-state.json --output transcript.json --timeout 1200
 ```
 
-**Response:**
+**API status response** (`GET /transcriptions/{id}/status`, polled internally by the helper):
 ```text
 {"status": "processing", "progress": 45}
 # or:
 {"status": "completed", "progress": 100}
 ```
+
+The helper itself prints a JSON envelope (`task_id`, `service`, `provider_job_id`,
+`status`, `artifacts`, `quota_observed`, `timeouts`, `errors`, `updated_at`) and exits
+nonzero unless `status` is `completed`; see [Starter and Relay safety](STARTER_RELAY.md).
 
 **Polling interval:** the helper checks status every 2 seconds until its polling
 deadline; `--timeout` defaults to 120 seconds. Examples that pass `--timeout 1200`
@@ -146,11 +150,11 @@ import subprocess
 # Resume an existing job using its durable private state. No upload occurs.
 run = subprocess.run(["python3", "scripts/client.py", "resume", "--state", "speech-state.json",
                       "--output", "transcript.json", "--timeout", "1200"],
-                     capture_output=True, text=True)
+                     capture_output=True, text=True, encoding="utf-8")
 envelope = json.loads(run.stdout)
 if run.returncode != 0 or envelope["status"] != "completed":
     raise SystemExit(f"not completed: {envelope['status']} {envelope['errors']}")
-data = json.loads(Path(envelope["artifacts"][0]["reference"]).read_text())
+data = json.loads(Path(envelope["artifacts"][0]["reference"]).read_text(encoding="utf-8"))
 # The helper validates duration and segments; detected_language may be absent.
 print("lang:", data.get("detected_language"), "duration:", data["duration"])
 ```
