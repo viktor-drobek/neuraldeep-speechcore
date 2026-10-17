@@ -1,0 +1,93 @@
+# Agent instructions
+
+Instructions for coding agents (Codex, Coddy and others) working **on** this
+repository. The skill itself, which agents load to transcribe audio, is described
+in [SKILL.md](SKILL.md); its safety rules are in [STARTER_RELAY.md](STARTER_RELAY.md).
+
+## Project
+
+- `SKILL.md`: the skill and NeuralDeep SpeechCore API reference.
+- `scripts/client.py`: a standard-library helper with a fail-closed Starter guard
+  and resumable jobs. SpeechCore uploads are **blocked on purpose**: only
+  `check upload` (always `blocked`) and `resume` of an existing job work.
+- `tests/`: offline tests with mocked HTTP. `TESTING.md` records every change and
+  the current test count.
+- Python 3.10+ standard library only. No dependencies, no build step.
+
+## Setup and tests
+
+No install is needed. Run the tests from the repository root:
+
+```bash
+python3 -B -m unittest discover -s tests
+```
+
+Before opening a PR, also run these. All must pass, the warning count must be 0:
+
+```bash
+LC_ALL=C PYTHONUTF8=0 PYTHONCOERCECLOCALE=0 python3 -B -m unittest discover -s tests
+python3 -X warn_default_encoding -B -m unittest discover -s tests 2>&1 | grep -c EncodingWarning
+python3 -B scripts/client.py --help
+git diff --check
+```
+
+CI (`.github/workflows/tests.yml`) runs the suite and `--help` on Python 3.10 and
+3.x with no credential. `-B` keeps `__pycache__` out of the tree.
+
+## Rules
+
+- **Never call billed or live endpoints.** Do not run `scripts/client.py run`.
+  `check` and `resume` use the user's real API key; run them only when the user
+  asks. Tests must mock HTTP and must not need a credential.
+- **Fail closed.** No retries or resubmission of a billed POST, no redirects, no
+  API key or provider response body in errors or output. An ambiguous submission
+  is `reconciliation_required`, not a reason to try again.
+- **Do not unblock SpeechCore or whisper-1 uploads.** They stay blocked until a
+  remaining-quota endpoint is verified; that is the user's decision.
+- **Test first.** Add or change a test, show it fails, then fix. Record the change
+  and the new test count in `TESTING.md`.
+- **Keep the shared helper identical.** `scripts/client.py` is shared with
+  neuraldeep-search, -images, -ocr and -whisper-1; only the `SERVICE = "..."` line
+  differs. Port any helper change to the other repos, and check with:
+
+  ```bash
+  diff <(grep -v '^SERVICE = ' scripts/client.py) <(grep -v '^SERVICE = ' ../neuraldeep-search/scripts/client.py)
+  ```
+
+- **UTF-8 everywhere.** Pass `encoding="utf-8"` to every `read_text()`,
+  `write_text()`, `open()` in text mode and `subprocess.run(text=True)`, in code,
+  tests and Python examples in the docs. The docs tests check the examples.
+- **Docs examples must stay safe.** Fenced `python` and `bash` blocks in the
+  `.md` files are parsed (`ast.parse`, `bash -n`), never executed. Do not add
+  examples that upload, spend quota or print the key.
+- **Private runtime data stays out of git.** State files, transcripts, inputs,
+  keys and `.env` files are private. `.gitignore` covers the example names; do not
+  commit others either.
+
+## Credentials
+
+The helper reads `api_key` from
+`${CODDY_HOME:-~/.coddy}/providers/neuraldeep/neuraldeep-auth.json`, then falls
+back to `NEURALDEEP_API_KEY`. Never print, log or commit either. Coddy users sign
+in with `coddy providers login neuraldeep`.
+
+## Git and PRs
+
+- Work on a branch and open a PR against `main`; do not push to `main`. Merging is
+  the owner's decision.
+- Do not force-push shared branches or rewrite published history without the
+  owner's explicit approval.
+- Do not add co-author trailers or "Generated with ..." lines for AI agents to
+  commits or PR descriptions.
+- Several agent sessions may work in these repos at once. Check `git status` and
+  fetch before you start, and do not change a checkout or branch another session
+  is using.
+
+## Agent notes
+
+- **Codex** reads this file automatically. The tests need no network and write
+  only to temporary directories, so the default sandbox should be enough; ask before running `check` or `resume`, which need
+  network and the user's key.
+- **Coddy** loads this file as project instructions. Use ask or plan mode for
+  reviews. The skill under development is `SKILL.md`; do not install it from
+  this checkout into `${CODDY_HOME:-~/.coddy}` unless the user asks.
