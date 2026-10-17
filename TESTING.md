@@ -76,3 +76,9 @@ Added `test_http_error_response_is_closed` first; it failed because
 left its response open (a `ResourceWarning` under Python 3.14). `request()` now
 closes it, matching neuraldeep-search cbb6fc3. **27 tests passed**, with no
 `ResourceWarning`.
+
+Ported from neuraldeep-images: `multipart()` now keeps only an alphanumeric
+file extension (`\.[A-Za-z0-9]{1,10}`) in the `filename=` header, so local
+names with quotes, `;` or line breaks cannot inject header text. The
+regression `test_multipart_filename_cannot_inject_headers` failed first
+(4 injection cases); the suite is now **28 tests**.

@@ -253,10 +253,12 @@ def job_urls(service, job_id):
 
 def multipart(path, field, fields):
     boundary = uuid.uuid4().hex
+    # Local names may contain quotes or line breaks; never copy them into headers.
+    suffix = Path(path).suffix if re.fullmatch(r"\.[A-Za-z0-9]{1,10}", Path(path).suffix) else ""
     parts = []
     for name, value in fields.items():
         parts.append(f'--{boundary}\r\nContent-Disposition: form-data; name="{name}"\r\n\r\n{value}\r\n'.encode())
-    parts.append(f'--{boundary}\r\nContent-Disposition: form-data; name="{field}"; filename="upload{Path(path).suffix}"\r\nContent-Type: application/octet-stream\r\n\r\n'.encode())
+    parts.append(f'--{boundary}\r\nContent-Disposition: form-data; name="{field}"; filename="upload{suffix}"\r\nContent-Type: application/octet-stream\r\n\r\n'.encode())
     parts.extend([Path(path).read_bytes(), f"\r\n--{boundary}--\r\n".encode()])
     return b"".join(parts), "multipart/form-data; boundary=" + boundary
 

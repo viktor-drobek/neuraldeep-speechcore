@@ -331,6 +331,20 @@ class SafetyTests(unittest.TestCase):
             self.assertEqual(artifact["provenance"]["endpoint"], "/result")
             self.assertEqual(artifact["provenance"]["trust"], "untrusted_data")
 
+    def test_multipart_filename_cannot_inject_headers(self):
+        cases = {"photo.JPEG": "upload.JPEG", "x.png\r\nX-Evil: 1": "upload", 'a.p"ng': "upload",
+                 "b.png; name=evil": "upload", "c.png\nX-Evil: 1": "upload", "noext": "upload"}
+        for name, expected in cases.items():
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as tmp:
+                path = Path(tmp) / name
+                path.write_bytes(b"input-fixture")
+                body, content_type = client.multipart(path, "image", {})
+                part = body.split(b"--" + content_type.split("; boundary=")[1].encode())[1]
+                head = part.removeprefix(b"\r\n").split(b"\r\n\r\n", 1)[0].decode()
+                self.assertEqual(head.split("\r\n"), [f'Content-Disposition: form-data; name="image"; filename="{expected}"',
+                                                      "Content-Type: application/octet-stream"])
+                self.assertNotIn(b"X-Evil", body)
+
 
 if __name__ == "__main__":
     unittest.main()
