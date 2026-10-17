@@ -1,0 +1,31 @@
+name: tests
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  offline:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    strategy:
+      fail-fast: false
+      matrix:
+        # Oldest supported version from the docs, plus the latest release.
+        python-version: ["3.10", "3.x"]
+    env:
+      # Offline only: tests use mocked HTTP and must never see a real credential.
+      NEURALDEEP_API_KEY: ""
+      CODDY_HOME: /nonexistent-coddy-home
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Unit and documentation tests
+        run: python3 -B -m unittest discover -s tests -v
+      - name: CLI help without network
+        run: python3 -B scripts/client.py --help

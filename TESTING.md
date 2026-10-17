@@ -108,3 +108,12 @@ file with a non-ASCII field was reported as having no credential, and a UTF-8
 read and write text as UTF-8 explicitly. **32 tests passed**, both normally and
 with `LC_ALL=C PYTHONUTF8=0`, with no `EncodingWarning` under
 `-X warn_default_encoding`.
+
+Ported from neuraldeep-images (beb9533): the 429 case in the HTTP-error test and seven tests: origin allowlist, no
+key on public prices, refused redirects, timeout then resume from saved state,
+refusal to resume non-resumable state, multipart layout, and submission routing.
+They pin existing behavior, so they passed on first run; each was checked by a
+targeted mutation of `client.py` in a scratch copy, which it caught. The images
+CI workflow (`.github/workflows/tests.yml`: offline suite and `--help` on Python
+3.10 and 3.x, with no credential in the environment) was copied unchanged; the
+suite is now **39 tests**.
