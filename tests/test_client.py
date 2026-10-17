@@ -607,6 +607,37 @@ class SafetyTests(unittest.TestCase):
                 self.assertFalse(output.exists())
                 self.assertEqual(state.read_text(encoding="utf-8"), text)
 
+    def test_whisper_is_synchronous_and_refuses_resume(self):
+        import io
+        import sys
+        self.assertIn("whisper", client.SYNCHRONOUS)
+        with tempfile.TemporaryDirectory() as tmp, patch.object(client, "SERVICE", "whisper"), patch.object(client, "resolve_key", return_value="fixture"):
+            state = Path(tmp) / "state.json"
+            argv = ["client.py", "resume", "--job-id", "job-fixture", "--state", str(state), "--output", str(Path(tmp) / "result.json")]
+            with patch.object(client, "request") as req, patch.object(sys, "argv", argv), patch("sys.stdout", new_callable=io.StringIO) as out:
+                self.assertEqual(client.main(), 1)
+            result = json.loads(out.getvalue())
+            self.assertEqual(result["status"], "blocked")
+            self.assertIn("Synchronous whisper has no resumable job endpoint", result["errors"][0])
+            self.assertFalse(state.exists())
+            req.assert_not_called()
+
+    def test_whisper_run_is_blocked_before_any_request(self):
+        import io
+        import sys
+        with tempfile.TemporaryDirectory() as tmp, patch.object(client, "SERVICE", "whisper"), patch.object(client, "resolve_key", return_value="fixture"):
+            output = Path(tmp) / "result.json"
+            argv = ["client.py", "run", "transcribe", "--file", str(Path(tmp) / "missing.wav"),
+                    "--state", str(Path(tmp) / "state.json"), "--output", str(output)]
+            with patch.object(client, "request") as req, patch.object(client, "multipart") as body, patch.object(sys, "argv", argv), patch("sys.stdout", new_callable=io.StringIO) as out:
+                self.assertEqual(client.main(), 1)
+            result = json.loads(out.getvalue())
+            self.assertEqual(result["status"], "blocked")
+            self.assertIn("whisper-1 transcription disabled until remaining quota is verified", result["errors"][0])
+            self.assertFalse(output.exists())
+            req.assert_not_called()
+            body.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()
