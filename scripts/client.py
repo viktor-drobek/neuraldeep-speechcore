@@ -32,6 +32,14 @@ SYNCHRONOUS = {"search", "whisper", "diarize"}
 # Provider limits for /v1/audio/diarize: up to 4 hours and 500 MB per file.
 MAX_DIARIZE_MINUTES = 240
 MAX_DIARIZE_BYTES = 500 * 1000 * 1000
+# The diarization answer arrives on the POST itself, so a long file needs a long
+# read timeout: a cut-off answer may already be charged and must not be resent.
+REQUEST_TIMEOUT = 30
+
+
+def diarize_timeout(minutes):
+    return max(120, 30 * minutes)
+
 # Field holding the provider job ID in each async submission response.
 JOB_ID_FIELDS = {"images": "task_uid", "ocr": "id", "speechcore": "task_id"}
 # Documented in SKILL.md; tests keep the two in sync.
@@ -79,7 +87,7 @@ class NoRedirect(HTTPRedirectHandler):
         return None
 
 
-def request(method, url, key, body=None, content_type="application/json", *, timeout=30, raw=False, opener=None):
+def request(method, url, key, body=None, content_type="application/json", *, timeout=REQUEST_TIMEOUT, raw=False, opener=None):
     parsed = urlsplit(url)
     if (parsed.scheme != "https" or parsed.netloc not in
             {"api.neuraldeep.ru", "speechcore.neuraldeep.ru", "neuraldeep.ru"}):
@@ -221,7 +229,10 @@ def save_artifact(path, data, endpoint):
 
 
 def finite(value):
-    return type(value) in (int, float) and math.isfinite(value)
+    try:
+        return type(value) in (int, float) and math.isfinite(value)
+    except OverflowError:  # an int too large for a float
+        return False
 
 
 def check_segments(segments, label):
@@ -295,16 +306,19 @@ def merge_transcript(diarization, transcript):
         check_segments(transcript.get("segments"), "text")
     except (ValueError, TypeError):
         raise Blocked("Transcript is not a JSON object with timed text segments") from None
-    speakers = list(dict.fromkeys(s["speaker"] for s in diarization["segments"]))
+    timed = sorted(diarization["segments"], key=lambda s: (s["start"], s["end"]))
+    speakers = list(dict.fromkeys(s["speaker"] for s in timed))
     turns, unassigned = [], 0
-    for segment in transcript["segments"]:
+    for segment in sorted(transcript["segments"], key=lambda s: (s["start"], s["end"])):
         text = segment["text"].strip()
         if not text:
             continue
         start, end = segment["start"], segment["end"]
         overlap = dict.fromkeys(speakers, 0.0)
-        for turn in diarization["segments"]:
+        for turn in timed:
             overlap[turn["speaker"]] += max(0.0, min(end, turn["end"]) - max(start, turn["start"]))
+        # Microsecond rounding keeps equal overlaps equal despite float error.
+        overlap = {k: round(v, 6) for k, v in overlap.items()}
         best = max(speakers, key=lambda s: overlap[s], default=None)
         speaker = best if best is not None and overlap[best] > 0 else None
         unassigned += speaker is None
@@ -316,15 +330,67 @@ def merge_transcript(diarization, transcript):
     return {"speakers": speakers, "turns": turns, "unassigned_segments": unassigned}
 
 
+def clock(ms, separator):
+    return f"{ms // 3600000:02d}:{ms // 60000 % 60:02d}:{ms // 1000 % 60:02d}{separator}{ms % 1000:03d}"
+
+
+def cues(merged, separator):
+    """Yield (timing, speaker, text) per turn; a cue lasts at least 1 ms and fits on one line."""
+    for turn in merged["turns"]:
+        start = round(turn["start"] * 1000)
+        end = max(round(turn["end"] * 1000), start + 1)
+        speaker = " ".join((turn["speaker"] or "").split()) or None
+        yield f"{clock(start, separator)} --> {clock(end, separator)}", speaker, " ".join(turn["text"].split())
+
+
+def to_webvtt(merged):
+    def escape(text):
+        return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    blocks = [f"{timing}\n" + (f"<v {escape(speaker)}>" if speaker is not None else "") + escape(text)
+              for timing, speaker, text in cues(merged, ".")]
+    return "WEBVTT\n\n" + "\n\n".join(blocks) + "\n"
+
+
+def to_srt(merged):
+    blocks = [f"{n}\n{timing}\n" + (f"{speaker}: " if speaker is not None else "") + text
+              for n, (timing, speaker, text) in enumerate(cues(merged, ","), 1)]
+    return "\n\n".join(blocks) + "\n"
+
+
+def to_rttm(diarization, file_id):
+    def token(value):
+        return re.sub(r"\s+", "_", value.strip()) or "_"
+    return "".join(f"SPEAKER {token(file_id)} 1 {s['start']:.3f} {s['end'] - s['start']:.3f} <NA> <NA> "
+                   f"{token(s['speaker'])} <NA> <NA>\n" for s in diarization["segments"])
+
+
+MERGE_FORMATS = ("json", "vtt", "srt", "rttm")
+
+
 def merge_files(args):
-    sources = [Path(args.diarization), Path(args.transcript)]
+    fmt = getattr(args, "format", "json")
+    names = ("diarization",) if fmt == "rttm" else ("diarization", "transcript")
+    sources = [Path(getattr(args, name)) for name in names]
     if Path(args.output).resolve() in {p.resolve() for p in sources}:
         raise Blocked("Output must differ from the inputs")
     raw = [p.read_bytes() for p in sources]
-    merged = merge_transcript(*(json.loads(data.decode("utf-8")) for data in raw))
-    merged["sources"] = {name: hashlib.sha256(data).hexdigest() for name, data in zip(("diarization", "transcript"), raw)}
-    data = json.dumps(merged, ensure_ascii=False, indent=2).encode("utf-8")
-    return {"status": "completed", "artifacts": [save_artifact(args.output, data, "local:merge")]}
+    hashes = {name: hashlib.sha256(data).hexdigest() for name, data in zip(names, raw)}
+    values = [json.loads(data.decode("utf-8")) for data in raw]
+    if fmt == "rttm":
+        try:
+            validate_diarization(values[0])
+        except (ValueError, TypeError):
+            raise Blocked("Diarization input does not match the /v1/audio/diarize JSON shape") from None
+        text = to_rttm(values[0], sources[0].stem)
+    else:
+        merged = merge_transcript(*values)
+        if fmt == "json":
+            text = json.dumps(dict(merged, sources=hashes), ensure_ascii=False, indent=2)
+        else:
+            text = to_webvtt(merged) if fmt == "vtt" else to_srt(merged)
+    artifact = save_artifact(args.output, text.encode("utf-8"), "local:merge")
+    artifact["provenance"]["sources"] = hashes
+    return {"status": "completed", "artifacts": [artifact]}
 
 
 def poll(get, status_url, result_url, success, *, timeout=DEFAULT_TIMEOUT, interval=POLL_INTERVAL):
@@ -419,6 +485,13 @@ def execute(args):
         return {"status": "ready", "quota_observed": preflight(SERVICE, args.operation, key, units, model=getattr(args, "model", None))}
     if Path(args.state).resolve() == Path(args.output).resolve():
         raise Blocked("State and artifact paths must differ")
+    if args.command == "run":
+        # A paid answer must have somewhere to go and must not replace its own input.
+        output = Path(args.output).resolve()
+        if args.file and output == Path(args.file).resolve():
+            raise Blocked("Artifact path must differ from the input file")
+        if not output.parent.is_dir() or not os.access(output.parent, os.W_OK):
+            raise Blocked("Artifact directory is missing or not writable")
     if args.command == "resume":
         if SERVICE in SYNCHRONOUS:
             raise Blocked(f"Synchronous {SERVICE} has no resumable job endpoint")
@@ -438,7 +511,8 @@ def execute(args):
             raise Blocked("State is not resumable; reconcile without submitting again")
     else:
         state = new_state(args.state, args.task_id, SERVICE)
-    state["timeouts"] = {"request_seconds": 30, "poll_seconds": args.timeout}
+    post_timeout = diarize_timeout(units) if SERVICE == "diarize" and type(units) is int else REQUEST_TIMEOUT
+    state["timeouts"] = {"request_seconds": post_timeout, "poll_seconds": args.timeout}
     try:
         if args.command == "run":
             method, url, body, content_type = submission(args)
@@ -446,7 +520,7 @@ def execute(args):
             # An interruption from here until an ID is persisted requires reconciliation.
             state["status"] = "reconciliation_required"
             save_state(args.state, state)
-            response = request(method, url, key, body, content_type)
+            response = request(method, url, key, body, content_type, timeout=post_timeout)
             if SERVICE == "search":
                 if not isinstance(response, dict) or response.get("success") is False or response.get("error"):
                     raise JobError("Search returned an error response")
@@ -501,6 +575,7 @@ def main():
     parser.add_argument("--minutes", type=int, default=0, help="Verified audio duration in whole minutes, rounded up; required before diarization")
     parser.add_argument("--diarization", help="merge: diarization JSON from /v1/audio/diarize")
     parser.add_argument("--transcript", help="merge: transcript JSON with timed text segments")
+    parser.add_argument("--format", choices=MERGE_FORMATS, help="merge output: json (default), vtt, srt, or rttm from the diarization alone")
     parser.add_argument("--state", default="job-state.json", help="Private durable state; must not exist for a new submission")
     parser.add_argument("--output", default="result.bin")
     parser.add_argument("--task-id", default="standalone")
@@ -513,10 +588,13 @@ def main():
         parser.error("--model applies only to transcription")
     if (args.minutes or args.command == "merge") and SERVICE != "diarize":
         parser.error("--minutes and merge apply only to diarization")
-    if args.command == "merge" and not (args.diarization and args.transcript):
-        parser.error("merge needs --diarization and --transcript")
-    if args.command != "merge" and (args.diarization or args.transcript):
-        parser.error("--diarization and --transcript apply only to merge")
+    if args.command != "merge" and (args.diarization or args.transcript or args.format):
+        parser.error("--diarization, --transcript and --format apply only to merge")
+    args.format = args.format or "json"
+    if args.command == "merge" and not args.diarization:
+        parser.error("merge needs --diarization")
+    if args.command == "merge" and bool(args.transcript) == (args.format == "rttm"):
+        parser.error("merge needs --transcript, except --format rttm, which takes none")
     try:
         result = execute(args)
     except (Blocked, RequestError, JobError) as error:

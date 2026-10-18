@@ -271,3 +271,25 @@ were added first and failed with `KeyError: 'diarize'` and the missing
 **86 tests passed** (1 skipped outside a tag build), both normally and with
 `LC_ALL=C PYTHONUTF8=0`, with no `EncodingWarning` under
 `-X warn_default_encoding`.
+
+## Diarization formats and cross-review fixes
+
+Port from neuraldeep-diarization. `merge --format json|vtt|srt|rttm` writes
+WebVTT with voice tags, SRT with a speaker prefix, or RTTM converted locally
+from the diarization alone. A cross-review of the diarization skill led to
+shared fixes, each with a test written first:
+- the diarization POST waits `max(120, 30 * minutes)` s;
+- every service's `run` checks `--output` before any request, so an output
+  equal to `--file` or in a missing directory blocks instead of overwriting the
+  input or losing a paid answer;
+- subtitle speaker labels are flattened, and the 1 ms cue minimum applies after
+  rounding;
+- `finite()` rejects integers too large for a float;
+- `merge` sorts its inputs by time and compares overlaps to the microsecond;
+- the 500 MB cap is tested.
+`STARTER_RELAY.md` documents the output check, and this service is otherwise
+unchanged. The 15 new shared tests failed first, apart from the flag-rule and
+cap tests, which only add coverage.
+**101 tests passed** (1 skipped outside a tag build), both normally and with
+`LC_ALL=C PYTHONUTF8=0`, with no `EncodingWarning` under
+`-X warn_default_encoding`.

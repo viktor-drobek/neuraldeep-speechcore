@@ -554,7 +554,10 @@ class SafetyTests(unittest.TestCase):
                              output=str(tmp / "merged.json"), task_id="task-fixture")
             def merge():
                 client.execute(args)
-                return json.loads((tmp / "merged.json").read_bytes().decode("utf-8"))["turns"][0]["text"] == text
+                args.format, args.output = "vtt", str(tmp / "merged.vtt")
+                client.execute(args)
+                return (json.loads((tmp / "merged.json").read_bytes().decode("utf-8"))["turns"][0]["text"] == text
+                        and text in (tmp / "merged.vtt").read_bytes().decode("utf-8"))
             with patch.object(client, "SERVICE", "diarize"):
                 attempt("merge", merge)
             print(json.dumps(out))
@@ -981,14 +984,16 @@ class SafetyTests(unittest.TestCase):
             with self.subTest(diarization=diarization, transcript=transcript), self.assertRaises(client.Blocked):
                 client.merge_transcript(diarization, transcript)
 
-    def merge_cli(self, tmp, diarization, transcript, output=None):
+    def merge_cli(self, tmp, diarization, transcript, output=None, extra=()):
         import io
         import sys
         d, t = Path(tmp) / "diarization.json", Path(tmp) / "transcript.json"
         d.write_text(json.dumps(diarization), encoding="utf-8")
-        t.write_text(json.dumps(transcript, ensure_ascii=False), encoding="utf-8")
         output = output or str(Path(tmp) / "speakers.json")
-        argv = ["client.py", "merge", "--diarization", str(d), "--transcript", str(t), "--output", output]
+        argv = ["client.py", "merge", "--diarization", str(d), "--output", output, *extra]
+        if transcript is not None:
+            t.write_text(json.dumps(transcript, ensure_ascii=False), encoding="utf-8")
+            argv += ["--transcript", str(t)]
         with patch.object(client, "SERVICE", "diarize"), patch.object(client, "request") as req, \
                 patch.object(client, "resolve_key") as key, patch.object(sys, "argv", argv), \
                 patch("sys.stdout", new_callable=io.StringIO) as out:
@@ -996,6 +1001,164 @@ class SafetyTests(unittest.TestCase):
         req.assert_not_called()
         key.assert_not_called()
         return code, json.loads(out.getvalue()), Path(output)
+
+    def turns(self, *turns):
+        return {"speakers": [], "unassigned_segments": 0,
+                "turns": [dict(zip(("speaker", "start", "end", "text"), t)) for t in turns]}
+
+    def test_webvtt_marks_speakers_with_voice_tags(self):
+        merged = client.merge_transcript(self.diarization(), self.transcript_json())
+        self.assertEqual(client.to_webvtt(merged),
+                         "WEBVTT\n\n"
+                         "00:00:00.000 --> 00:00:05.000\n<v SPEAKER_0>Hello there. Hi.\n\n"
+                         "00:00:17.000 --> 00:00:21.000\n<v SPEAKER_1>How are you? Fine.\n\n"
+                         "00:00:30.000 --> 00:00:31.000\nBye.\n")
+
+    def test_srt_prefixes_the_speaker_and_numbers_cues(self):
+        merged = client.merge_transcript(self.diarization(), self.transcript_json())
+        self.assertEqual(client.to_srt(merged),
+                         "1\n00:00:00,000 --> 00:00:05,000\nSPEAKER_0: Hello there. Hi.\n\n"
+                         "2\n00:00:17,000 --> 00:00:21,000\nSPEAKER_1: How are you? Fine.\n\n"
+                         "3\n00:00:30,000 --> 00:00:31,000\nBye.\n")
+
+    def test_subtitles_escape_markup_flatten_lines_and_keep_cues_valid(self):
+        merged = self.turns(("A>B", 2.0, 2.0, "a < b & c --> d\n\nnext"), (None, 3723.4567, 3724, "late"))
+        self.assertEqual(client.to_webvtt(merged),
+                         "WEBVTT\n\n00:00:02.000 --> 00:00:02.001\n<v A&gt;B>a &lt; b &amp; c --&gt; d next\n\n"
+                         "01:02:03.457 --> 01:02:04.000\nlate\n")
+        self.assertEqual(client.to_srt(merged),
+                         "1\n00:00:02,000 --> 00:00:02,001\nA>B: a < b & c --> d next\n\n"
+                         "2\n01:02:03,457 --> 01:02:04,000\nlate\n")
+
+    def test_rttm_lists_one_speaker_line_per_segment(self):
+        diarization = self.diarization()
+        diarization["segments"].append({"speaker": "SPEAKER 2", "start": 30, "end": 30.5})
+        self.assertEqual(client.to_rttm(diarization, "meeting"),
+                         "SPEAKER meeting 1 1.100 4.650 <NA> <NA> SPEAKER_0 <NA> <NA>\n"
+                         "SPEAKER meeting 1 17.280 3.980 <NA> <NA> SPEAKER_1 <NA> <NA>\n"
+                         "SPEAKER meeting 1 30.000 0.500 <NA> <NA> SPEAKER_2 <NA> <NA>\n")
+
+    def test_merge_cli_writes_each_format_with_source_hashes(self):
+        expected = {"vtt": "WEBVTT\n\n00:00:00.000", "srt": "1\n00:00:00,000", "rttm": "SPEAKER diarization 1 1.100"}
+        for fmt, start in expected.items():
+            with self.subTest(fmt=fmt), tempfile.TemporaryDirectory() as tmp:
+                transcript = None if fmt == "rttm" else self.transcript_json()
+                output = str(Path(tmp) / f"out.{fmt}")
+                code, result, out = self.merge_cli(tmp, self.diarization(), transcript, output, ["--format", fmt])
+                self.assertEqual((code, result["status"]), (0, "completed"))
+                self.assertTrue(out.read_text(encoding="utf-8").startswith(start))
+                sources = result["artifacts"][0]["provenance"]["sources"]
+                self.assertEqual(sources["diarization"], client.hashlib.sha256(Path(tmp, "diarization.json").read_bytes()).hexdigest())
+                self.assertEqual("transcript" in sources, fmt != "rttm")
+
+    def test_rttm_file_id_comes_from_the_diarization_file_name(self):
+        import io
+        import sys
+        with tempfile.TemporaryDirectory() as tmp:
+            d, out = Path(tmp) / "my meeting.json", Path(tmp) / "out.rttm"
+            d.write_text(json.dumps(self.diarization()), encoding="utf-8")
+            argv = ["client.py", "merge", "--diarization", str(d), "--format", "rttm", "--output", str(out)]
+            with patch.object(client, "SERVICE", "diarize"), patch.object(sys, "argv", argv), patch("sys.stdout", new_callable=io.StringIO):
+                self.assertEqual(client.main(), 0)
+            self.assertTrue(out.read_text(encoding="utf-8").startswith("SPEAKER my_meeting 1 1.100 4.650 "))
+
+    def test_format_flag_rules(self):
+        import io
+        import sys
+        cases = [("diarize", ["check", "--format", "vtt"]), ("search", ["check", "web", "--format", "json"]),
+                 ("diarize", ["merge", "--diarization", "d.json", "--format", "vtt"]),
+                 ("diarize", ["merge", "--diarization", "d.json", "--transcript", "t.json", "--format", "rttm"]),
+                 ("diarize", ["merge", "--diarization", "d.json", "--transcript", "t.json", "--format", "stm"])]
+        for service, argv in cases:
+            with self.subTest(argv=argv), patch.object(client, "SERVICE", service), patch.object(client, "request") as req, \
+                    patch.object(sys, "argv", ["client.py", *argv]), patch("sys.stdout", new_callable=io.StringIO), \
+                    patch("sys.stderr", new_callable=io.StringIO):
+                with self.assertRaises(SystemExit) as raised:
+                    client.main()
+            self.assertEqual(raised.exception.code, 2)
+            req.assert_not_called()
+
+    # Cross-review fixes (2026-10-18).
+    def test_diarize_post_waits_longer_than_the_default_timeout(self):
+        for minutes, seconds in ((3, 120), (10, 300), (240, 7200)):
+            with self.subTest(minutes=minutes), tempfile.TemporaryDirectory() as tmp, \
+                    patch.object(client, "SERVICE", "diarize"), patch.object(client, "resolve_key", return_value="fixture"), \
+                    patch.object(client, "preflight", return_value={}):
+                args = self.diarize_args(tmp, minutes=minutes)
+                with patch.object(client, "request", return_value=self.diarization()) as req:
+                    result = client.execute(args)
+                self.assertEqual(req.call_args.kwargs.get("timeout"), seconds)
+                self.assertEqual(result["timeouts"]["request_seconds"], seconds)
+        self.assertEqual(client.diarize_timeout(1), 120)
+
+    def test_run_checks_the_output_path_before_any_request(self):
+        for case in ("output is the input", "missing directory"):
+            for service in ("diarize", "ocr"):
+                with self.subTest(case=case, service=service), tempfile.TemporaryDirectory() as tmp, \
+                        patch.object(client, "SERVICE", service), patch.object(client, "resolve_key", return_value="fixture"):
+                    args = self.diarize_args(tmp)
+                    args.operation = client.OPERATIONS[service][0]
+                    args.output = args.file if case == "output is the input" else str(Path(tmp) / "missing" / "out.json")
+                    with patch.object(client, "request") as req, self.assertRaises(client.Blocked):
+                        client.execute(args)
+                    req.assert_not_called()
+                    self.assertEqual(Path(args.file).read_bytes(), b"ID3 audio fixture")
+                    self.assertFalse(Path(args.state).exists())
+
+    def test_subtitle_speaker_labels_are_flattened_and_empty_labels_dropped(self):
+        merged = self.turns(("A\n\n00:00:09.000 --> 00:00:10.000", 0, 1, "one"), ("  ", 2, 3, "two"))
+        self.assertEqual(client.to_webvtt(merged),
+                         "WEBVTT\n\n00:00:00.000 --> 00:00:01.000\n<v A 00:00:09.000 --&gt; 00:00:10.000>one\n\n"
+                         "00:00:02.000 --> 00:00:03.000\ntwo\n")
+        self.assertEqual(client.to_srt(merged),
+                         "1\n00:00:00,000 --> 00:00:01,000\nA 00:00:09.000 --> 00:00:10.000: one\n\n"
+                         "2\n00:00:02,000 --> 00:00:03,000\ntwo\n")
+
+    def test_minimum_cue_length_is_applied_after_rounding(self):
+        merged = self.turns(("S", 0.0015, 0.0015, "x"))
+        self.assertIn("00:00:00.002 --> 00:00:00.003", client.to_webvtt(merged))
+        self.assertIn("00:00:00,002 --> 00:00:00,003", client.to_srt(merged))
+
+    def test_huge_numbers_are_invalid_not_a_crash(self):
+        self.assertFalse(client.finite(10 ** 400))
+        with self.assertRaises(client.Blocked):
+            client.merge_transcript(dict(self.diarization(), duration=10 ** 400), self.transcript_json())
+        with tempfile.TemporaryDirectory() as tmp, patch.object(client, "SERVICE", "diarize"), \
+                patch.object(client, "resolve_key", return_value="fixture"), patch.object(client, "preflight", return_value={}):
+            args = self.diarize_args(tmp)
+            with patch.object(client, "request", return_value=dict(self.diarization(), duration=10 ** 400)):
+                result = client.execute(args)
+            self.assertEqual(result["status"], "reconciliation_required")
+            self.assertIn("diarization", result["errors"][0].lower())
+
+    def test_merge_orders_segments_by_time(self):
+        diarization = dict(self.diarization(), segments=[
+            {"speaker": "B", "start": 1.0, "end": 2.0}, {"speaker": "A", "start": 0.0, "end": 1.0},
+            {"speaker": "A", "start": 9.0, "end": 13.0}])
+        transcript = {"segments": [{"start": 10.0, "end": 12.0, "text": "later"},
+                                   {"start": 0.0, "end": 2.0, "text": "tie"}]}
+        merged = client.merge_transcript(diarization, transcript)
+        self.assertEqual(merged["speakers"], ["A", "B"])
+        self.assertEqual([(t["speaker"], t["start"], t["text"]) for t in merged["turns"]], [("A", 0.0, "tie later")])
+
+    def test_equal_overlaps_tie_despite_float_rounding(self):
+        diarization = dict(self.diarization(), segments=[
+            {"speaker": "A", "start": 0.1, "end": 0.2}, {"speaker": "B", "start": 0.3, "end": 0.4}])
+        merged = client.merge_transcript(diarization, {"segments": [{"start": 0.0, "end": 0.5, "text": "x"}]})
+        self.assertEqual(merged["turns"][0]["speaker"], "A")
+
+    def test_diarize_file_cap_is_500_mb_and_inclusive(self):
+        self.assertEqual(client.MAX_DIARIZE_BYTES, 500 * 1000 * 1000)
+        with tempfile.TemporaryDirectory() as tmp, patch.object(client, "SERVICE", "diarize"), patch.object(client, "MAX_DIARIZE_BYTES", 4):
+            args = self.diarize_args(tmp)
+            for size, allowed in ((4, True), (5, False)):
+                Path(args.file).write_bytes(b"x" * size)
+                with self.subTest(size=size):
+                    if allowed:
+                        self.assertEqual(client.submission(args)[0], "POST")
+                    else:
+                        with self.assertRaises(client.Blocked):
+                            client.submission(args)
 
     def test_merge_cli_is_offline_and_writes_a_hashed_artifact(self):
         with tempfile.TemporaryDirectory() as tmp:
