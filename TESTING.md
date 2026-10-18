@@ -319,3 +319,16 @@ lone surrogate escape block with their own messages. `--output` equal to
 coverage case. **108 tests passed** (1 skipped outside a tag build), both
 normally and with `LC_ALL=C PYTHONUTF8=0`, with no `EncodingWarning` under
 `-X warn_default_encoding`.
+
+## Fourth cross-review fixes
+
+Port from neuraldeep-diarization `336ccf4`. The output check uses
+`os.path.isdir()`, because `Path.is_dir()` raises `PermissionError` on Python
+3.10 to 3.12 and broke the 3.10 CI job; `run` blocks replacing another user's
+file in a sticky directory before any request; the RTTM file ID shows
+non-UTF-8 file name bytes as U+FFFD; a tie test has the first speaker last in
+alphabetical order. The sticky-directory and file-name tests failed first.
+**111 tests passed** (1 skipped outside a tag build), both normally and with
+`LC_ALL=C PYTHONUTF8=0`, with no `EncodingWarning` under
+`-X warn_default_encoding`, and on Python 3.10.22 (Docker `python:3.10-slim`,
+non-root, no network).

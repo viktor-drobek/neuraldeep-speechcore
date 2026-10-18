@@ -1221,6 +1221,57 @@ class SafetyTests(unittest.TestCase):
                         with self.assertRaises(client.Blocked):
                             client.submission(args)
 
+    # Fourth cross-review (2026-10-18).
+    def test_run_blocks_an_output_another_user_owns_in_a_sticky_directory(self):
+        with tempfile.TemporaryDirectory() as tmp, patch.object(client, "SERVICE", "diarize"), \
+                patch.object(client, "resolve_key", return_value="fixture"):
+            sticky = Path(tmp) / "shared"
+            sticky.mkdir()
+            sticky.chmod(0o1777)
+            args = self.diarize_args(tmp)
+            args.output = str(sticky / "out.json")
+            Path(args.output).write_text("{}", encoding="utf-8")
+            # Pretend to be a user who owns neither the file nor the directory.
+            with patch.object(client.os, "geteuid", return_value=os.geteuid() + 4242), \
+                    patch.object(client, "request") as req, self.assertRaises(client.Blocked) as raised:
+                client.execute(args)
+            req.assert_not_called()
+            self.assertIn("sticky", str(raised.exception))
+            # The real owner, or a new file, is fine.
+            for output in (args.output, str(sticky / "new.json")):
+                args.output, args.state = output, str(Path(tmp) / f"state-{Path(output).stem}.json")
+                with patch.object(client, "preflight", return_value={}), \
+                        patch.object(client, "request", return_value=self.diarization()):
+                    self.assertEqual(client.execute(args)["status"], "completed")
+            # Without the sticky bit, a writable directory lets anyone replace the file.
+            plain = Path(tmp) / "plain"
+            plain.mkdir()
+            args.output, args.state = str(plain / "out.json"), str(Path(tmp) / "state-plain.json")
+            Path(args.output).write_text("{}", encoding="utf-8")
+            with patch.object(client.os, "geteuid", return_value=os.geteuid() + 4242), \
+                    patch.object(client, "preflight", return_value={}), \
+                    patch.object(client, "request", return_value=self.diarization()):
+                self.assertEqual(client.execute(args)["status"], "completed")
+
+    def test_rttm_file_id_survives_a_non_utf8_file_name(self):
+        import io
+        import sys
+        with tempfile.TemporaryDirectory() as tmp:
+            d = Path(tmp) / os.fsdecode(b"caf\xe9 talk.json")
+            d.write_text(json.dumps(self.diarization()), encoding="utf-8")
+            out = Path(tmp) / "out.rttm"
+            argv = ["client.py", "merge", "--diarization", str(d), "--format", "rttm", "--output", str(out)]
+            with patch.object(client, "SERVICE", "diarize"), patch.object(sys, "argv", argv), patch("sys.stdout", new_callable=io.StringIO):
+                self.assertEqual(client.main(), 0)
+            self.assertTrue(out.read_text(encoding="utf-8").startswith("SPEAKER caf\ufffd_talk 1 1.100 "))
+
+    def test_ties_follow_who_spoke_first_not_the_name(self):
+        diarization = dict(self.diarization(), segments=[
+            {"speaker": "B", "start": 0.0, "end": 1.0}, {"speaker": "A", "start": 1.0, "end": 2.0}])
+        merged = client.merge_transcript(diarization, {"segments": [{"start": 0.0, "end": 2.0, "text": "x"}]})
+        self.assertEqual(merged["speakers"], ["B", "A"])
+        self.assertEqual(merged["turns"][0]["speaker"], "B")
+
     def test_merge_cli_is_offline_and_writes_a_hashed_artifact(self):
         with tempfile.TemporaryDirectory() as tmp:
             code, result, output = self.merge_cli(tmp, self.diarization(), self.transcript_json())

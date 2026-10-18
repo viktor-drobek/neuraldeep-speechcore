@@ -8,6 +8,7 @@ import math
 import os
 from pathlib import Path
 import re
+import stat
 import tempfile
 import time
 from urllib.error import HTTPError, URLError
@@ -201,6 +202,16 @@ def atomic_write(path, data):
             os.unlink(tmp)
 
 
+def replace_denied(path):
+    """True when rename(2) may not replace path: another user's file in a sticky directory."""
+    try:
+        target, parent = os.lstat(path), os.stat(path.parent)
+    except OSError:
+        return False  # nothing to replace yet
+    uid = os.geteuid()
+    return bool(parent.st_mode & stat.S_ISVTX) and uid != 0 and uid not in (target.st_uid, parent.st_uid)
+
+
 def save_state(path, state):
     atomic_write(path, json.dumps(state, indent=2).encode())
 
@@ -369,6 +380,8 @@ def to_srt(items):
 
 def to_rttm(diarization, file_id):
     def token(value):
+        # A file name that is not UTF-8 arrives with surrogate escapes; show them as U+FFFD.
+        value = value.encode("utf-8", "surrogateescape").decode("utf-8", "replace")
         return re.sub(r"\s+", "_", value.strip()) or "_"
     return "".join(f"SPEAKER {token(file_id)} 1 {s['start']:.3f} {s['end'] - s['start']:.3f} <NA> <NA> "
                    f"{token(s['speaker'])} <NA> <NA>\n" for s in diarization["segments"])
@@ -522,13 +535,16 @@ def execute(args):
         output = Path(args.output)
         if args.file and output.resolve() == Path(args.file).resolve():
             raise Blocked("Artifact path must differ from the input file")
-        if output.is_dir():
+        # os.path.isdir() is False on any OSError; Path.is_dir() raises EACCES before 3.13.
+        if os.path.isdir(output):
             raise Blocked("Artifact path is a directory")
         # atomic_write() replaces the path as given, in its own (unresolved) parent.
         parent = output.absolute().parent
         # mkstemp needs write and search permission, the directory fsync read permission.
-        if not parent.is_dir() or not os.access(parent, os.R_OK | os.W_OK | os.X_OK):
+        if not os.path.isdir(parent) or not os.access(parent, os.R_OK | os.W_OK | os.X_OK):
             raise Blocked("Artifact directory is missing or not writable")
+        if replace_denied(output.absolute()):
+            raise Blocked("Artifact path belongs to another user in a sticky directory")
     if args.command == "resume":
         if SERVICE in SYNCHRONOUS:
             raise Blocked(f"Synchronous {SERVICE} has no resumable job endpoint")

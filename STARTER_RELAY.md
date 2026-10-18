@@ -64,7 +64,9 @@ Before any request, `run` also checks where the paid result will go: an
 symlinks are resolved) is missing or read-only, blocks before the submission
 ("Artifact path must differ from the input file", "Artifact path is a
 directory", "Artifact directory is missing or not writable"); the directory
-must be readable, writable and searchable.
+must be readable, writable and searchable. Another user's existing file in a
+sticky directory such as `/tmp`, which rename cannot replace, also blocks
+("Artifact path belongs to another user in a sticky directory").
 
 Choose a **new private state path** for new work. `run` refuses an existing
 state file, preventing accidental duplicate submissions. Do not delete or
