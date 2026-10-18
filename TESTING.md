@@ -431,3 +431,17 @@ every helper test now patches `resolve_keys`. **131 tests passed** (1 skipped
 outside a tag build), both normally and with `LC_ALL=C PYTHONUTF8=0`, with no
 `EncodingWarning` under `-X warn_default_encoding`, and on Python 3.10.22
 (Docker `python:3.10-slim`, non-root, no network).
+
+## Explained API errors
+
+Port from neuraldeep-diarization `9c19350`. An HTTP error now reads
+`HTTP <code> (<fixed hint>)` for every status the provider documents (400, 401,
+408, 422, 429, 500, 502, 503), with `retry after N s` and `window session|week`
+only for well-formed `Retry-After` and `X-Window` values; the provider's body and
+reason text are still never shown. SKILL.md has an "Error handling" table of
+these statuses, keeping this service's own notes, and a shared test keeps it in
+step with `ERROR_HINTS`. The three new shared tests failed first.
+**134 tests passed** (1 skipped outside a tag build), both normally and with
+`LC_ALL=C PYTHONUTF8=0`, with no `EncodingWarning` under
+`-X warn_default_encoding`, and on Python 3.10.22 (Docker `python:3.10-slim`,
+non-root, no network).

@@ -134,6 +134,9 @@ Relay installation or configuration changes:
   this is private runtime metadata, not a future spending guarantee.
 - `timeouts`, `errors`, and `updated_at`: operational diagnostics. Error text is
   sanitized; it does not include authorization headers or provider response bodies.
+  An HTTP error reads `HTTP <code> (<fixed hint>)`, with `retry after N s` and
+  `window session|week` only when the provider sends well-formed values; the
+  table in SKILL.md lists every explained status.
 
 Failed and timed-out jobs have no success artifact. Transfer referenced files
 through an authorized artifact channel; a local path is not a remote download

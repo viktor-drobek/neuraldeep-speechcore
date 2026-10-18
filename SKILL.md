@@ -198,13 +198,37 @@ print("lang:", data.get("detected_language"), "duration:", data["duration"])
 - Only the `POST /upload` call consumes a transcription credit.
 - Status polling and result fetching do **not** consume credits.
 
-## Error Handling
+## Error handling
 
-- `401 Unauthorized` — invalid key → re-check the key in `NEURALDEEP_SPEECHCORE_API_KEY`
-- `429` — daily limit reached. The helper reports `HTTP 429` without retrying
-  or reading `Retry-After`; wait and decide explicitly before trying again.
+The helper explains an HTTP error with a fixed text for its status, never the
+provider's response body, and adds `Retry-After` (whole seconds) and `X-Window`
+(`session` or `week`) when the provider sends well-formed values, for example
+`HTTP 429 (quota or rate limit reached); retry after 30 s; window week; no
+automatic retry`. It never retries by itself. What a failure means depends on
+when it happens:
+
+- during the preflight GETs, before anything is billed: `blocked`;
+- on the billed submission: `reconciliation_required`, since the work may have
+  been charged; reconcile with the provider's records, never submit blindly again;
+- while polling an existing job: `poll_error`; resume the same job later.
+
+| Code | What the provider documents | What to do |
+|---|---|---|
+| `400` | Invalid request body, or a request longer than allowed | Fix the input; a billed submission is reconciled first |
+| `401` | Key invalid or revoked, or not subscribed to the model | Check the key in `NEURALDEEP_SPEECHCORE_API_KEY` (or `NEURALDEEP_API_KEY`) in `~/.coddy/.env` |
+| `408` | Upstream timeout after the provider's own retries | Reconcile a submission; resume a job |
+| `422` | A parameter outside the allowed values | Fix the parameter |
+| `429` | A quota or rate limit; `X-Window` names the session or week window and `Retry-After` the wait | Check the quota with `check`; wait, then decide explicitly |
+| `500` | Internal error; the provider suggests repeating | Reconcile a submission before any new one; resume a job |
+| `502` | Upstream unavailable; usually passes on its own | Reconcile or resume as above |
+| `503` | Temporarily unavailable, with `Retry-After` | Wait; reconcile or resume as above |
+
+Any other status is reported as `HTTP <code>` without a hint. A transport
+failure or an unreadable answer is `Transport or response error`, with the same
+outcomes.
+
 - Large files: keep a generous polling timeout; queue processing is GPU-backed.
-- If `failed`, report failure with the private provider ID. A new upload requires a new explicit decision; never retry blindly.
+- A `failed` job is reported with its private provider ID. A new upload needs a new explicit decision; never retry blindly.
 
 ## Privacy & Security
 

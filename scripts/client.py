@@ -143,6 +143,37 @@ def resolve_keys(service=None):
                   "to ${CODDY_HOME:-~/.coddy}/.env, never to the chat")
 
 
+# What the provider documents for each HTTP status (llms-full.txt, "Лимиты и коды
+# ошибок" and the SpeechCore upload errors). The helper prints these fixed texts,
+# never a provider response body.
+ERROR_HINTS = {
+    400: "request rejected as invalid or too long",
+    401: "key invalid, revoked or not subscribed to this model",
+    408: "provider timed out upstream",
+    422: "a parameter is outside the allowed values",
+    429: "quota or rate limit reached",
+    500: "provider internal error",
+    502: "provider upstream unavailable",
+    503: "service temporarily unavailable",
+}
+
+
+def explain_http_error(code, headers):
+    """A sanitized one-line reason: the status, its fixed hint, and well-formed
+    Retry-After seconds and X-Window values only."""
+    parts = [f"HTTP {code}" + (f" ({ERROR_HINTS[code]})" if code in ERROR_HINTS else "")]
+    try:
+        retry = str(headers.get("Retry-After") or "").strip()
+        window = str(headers.get("X-Window") or "").strip().lower()
+    except AttributeError:
+        retry = window = ""
+    if re.fullmatch(r"\d{1,6}", retry):
+        parts.append(f"retry after {int(retry)} s")
+    if window in ("session", "week"):
+        parts.append(f"window {window}")
+    return "; ".join(parts + ["no automatic retry"])
+
+
 class NoRedirect(HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         return None
@@ -167,7 +198,7 @@ def request(method, url, key, body=None, content_type="application/json", *, tim
         return (data, media_type) if raw else json.loads(data)
     except HTTPError as error:
         error.close()
-        raise RequestError(f"HTTP {error.code}; no automatic retry") from None
+        raise RequestError(explain_http_error(error.code, error.headers)) from None
     except (URLError, TimeoutError, OSError, ValueError, HTTPException):
         raise RequestError("Transport or response error; no automatic retry") from None
     finally:

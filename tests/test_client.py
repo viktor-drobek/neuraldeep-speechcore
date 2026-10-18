@@ -1679,6 +1679,52 @@ class SafetyTests(unittest.TestCase):
         result, req = resume(both, None)
         self.assertEqual({c.args[2] for c in req.call_args_list}, {"key-one"})
 
+    # API error explanations (2026-10-18).
+    def http_error(self, code, headers=None):
+        import io
+        from urllib.error import HTTPError
+        opener = Mock()
+        body = io.BytesIO(b'{"detail": "private-body-fixture"}')
+        opener.open.side_effect = HTTPError("https://example.com", code, "private-reason", headers or {}, body)
+        with self.assertRaises(client.RequestError) as raised:
+            client.request("POST", client.HUB + "/audio/diarize", "secret-fixture", b"{}", opener=opener)
+        message = str(raised.exception)
+        for private in ("private-body-fixture", "private-reason", "secret-fixture"):
+            self.assertNotIn(private, message)
+        self.assertEqual(opener.open.call_count, 1)
+        return message
+
+    def test_http_errors_are_explained_from_a_fixed_table(self):
+        self.assertEqual(sorted(client.ERROR_HINTS), [400, 401, 408, 422, 429, 500, 502, 503])
+        for code, hint in client.ERROR_HINTS.items():
+            with self.subTest(code=code):
+                self.assertEqual(self.http_error(code), f"HTTP {code} ({hint}); no automatic retry")
+        self.assertEqual(self.http_error(418), "HTTP 418; no automatic retry")
+
+    def test_retry_after_and_window_are_reported_only_when_well_formed(self):
+        message = self.http_error(429, {"Retry-After": "30", "X-Window": "week"})
+        self.assertEqual(message, f"HTTP 429 ({client.ERROR_HINTS[429]}); retry after 30 s; window week; no automatic retry")
+        self.assertIn("retry after 120 s", self.http_error(503, {"Retry-After": " 120 "}))
+        for headers in ({"Retry-After": "Wed, 21 Oct 2026 07:28:00 GMT"}, {"Retry-After": "1e9"},
+                        {"Retry-After": "9999999"}, {"Retry-After": "-5"}, {"X-Window": "session\nX-Evil: 1"},
+                        {"X-Window": "evil"}):
+            with self.subTest(headers=headers):
+                message = self.http_error(429, headers)
+                self.assertEqual(message, f"HTTP 429 ({client.ERROR_HINTS[429]}); no automatic retry")
+        self.assertIn("window session", self.http_error(429, {"X-Window": "Session"}))
+
+    def test_skill_documents_every_explained_error_code(self):
+        import re
+        text = (Path(__file__).parents[1] / "SKILL.md").read_text(encoding="utf-8")
+        match = re.search(r"^## Error handling\n(.*?)(?=^## |\Z)", text, re.M | re.S | re.I)
+        self.assertIsNotNone(match, "SKILL.md has no Error handling section")
+        section = match.group(1)
+        for code in client.ERROR_HINTS:
+            with self.subTest(code=code):
+                self.assertIn(f"| `{code}` |", section)
+        for needle in ("Retry-After", "X-Window", "blocked", "reconciliation_required", "poll_error"):
+            self.assertIn(needle, section)
+
     def test_merge_cli_is_offline_and_writes_a_hashed_artifact(self):
         with tempfile.TemporaryDirectory() as tmp:
             code, result, output = self.merge_cli(tmp, self.diarization(), self.transcript_json())
