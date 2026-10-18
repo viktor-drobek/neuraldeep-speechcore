@@ -106,6 +106,18 @@ lives in native rules with identical bodies:
 - Change a rule and its counterpart together. `tests/test_agent_rules.py` checks the pairing, the
   scopes and the hook; it and `.codex/hooks/` are identical across the neuraldeep-* repositories.
 
+## Releases
+
+A release is a `vX.Y.Z` tag on `main` with a GitHub release. `metadata.version` in the `SKILL.md`
+frontmatter is the version Coddy shows and uses to decide whether an installed copy is older, so
+it must equal the tag without the `v`:
+
+1. In a PR, bump `metadata.version` (semantic versioning) and note the change in `TESTING.md`.
+2. After the PR is merged and CI is green, tag the merge commit and publish the release, for
+   example `gh release create v1.0.0 --target main --title v1.0.0 --notes-file NOTES.md`.
+3. CI runs on the tag push; `tests/test_release.py` fails the build if the tag and
+   `metadata.version` differ. It is identical across the neuraldeep-* repositories.
+
 ## Git and PRs
 
 - Work on a branch and open a PR against `main`; do not push to `main`. Merging is
