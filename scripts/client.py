@@ -17,6 +17,11 @@ from urllib.request import HTTPRedirectHandler, Request, build_opener
 import uuid
 
 SERVICE = "speechcore"
+# Each skill asks for its own key, then the shared one, in the environment or ${CODDY_HOME}/.env.
+KEY_VARIABLES = {"search": "NEURALDEEP_SEARCH_API_KEY", "ocr": "NEURALDEEP_OCR_API_KEY",
+                 "images": "NEURALDEEP_IMAGES_API_KEY", "speechcore": "NEURALDEEP_SPEECHCORE_API_KEY",
+                 "whisper": "NEURALDEEP_TRANSCRIPTIONS_API_KEY", "diarize": "NEURALDEEP_DIARIZATION_API_KEY"}
+SHARED_KEY = "NEURALDEEP_API_KEY"
 HUB = "https://api.neuraldeep.ru/v1"
 SPEECH = "https://speechcore.neuraldeep.ru/api"
 PRICES = "https://neuraldeep.ru/api/public/wallet-prices"
@@ -68,20 +73,74 @@ class PollTimeout(JobError):
     pass
 
 
-def resolve_key():
-    home = Path(os.environ.get("CODDY_HOME") or Path.home() / ".coddy").expanduser()
+def parse_dotenv_line(line):
+    """One line of a .env file as (key, value), or None; the same rules as Coddy's loader."""
+    line = line.strip()
+    if not line or line.startswith("#"):
+        return None
+    if line.startswith("export "):
+        line = line[len("export "):].strip()
+    index = line.find("=")
+    if index <= 0:
+        return None
+    key = line[:index].strip()
+    if not re.fullmatch(r"[A-Za-z0-9_]+", key):
+        return None
+    raw = line[index + 1:]
+    if len(raw) >= 2 and raw[0] in "\"'":
+        end = raw.rfind(raw[0])
+        if end > 0:
+            value = raw[1:end]
+            if raw[0] == '"':
+                for escape, char in (("\\n", "\n"), ("\\r", "\r"), ("\\t", "\t"), ("\\\\", "\\"), ('\\"', '"')):
+                    value = value.replace(escape, char)
+            return key, value
+    if "#" in raw:  # an inline comment after an unquoted value
+        raw = raw[:raw.index("#")]
+    return key, raw.strip()
+
+
+def read_dotenv(home):
+    """The assignments of home/.env; the first one of a name wins, as in Coddy."""
     try:
-        auth = json.loads((home / "providers/neuraldeep/neuraldeep-auth.json").read_text(encoding="utf-8"))
-        key = auth.get("api_key") if isinstance(auth, dict) else None
+        text = (Path(home) / ".env").read_text(encoding="utf-8")
     except (OSError, ValueError):
-        key = None
-    for value in (key, os.environ.get("NEURALDEEP_API_KEY")):
-        if isinstance(value, str) and value.strip() and value.strip().lower() != "null":
-            value = value.strip()
-            if any(c.isspace() for c in value):
-                continue
-            return value
-    raise Blocked("No credential; use coddy providers login neuraldeep or NEURALDEEP_API_KEY")
+        return {}
+    values = {}
+    for line in text.splitlines():
+        parsed = parse_dotenv_line(line)
+        if parsed:
+            values.setdefault(*parsed)
+    return values
+
+
+def usable_keys(value):
+    """The comma-separated keys of a value, without empty, null or whitespace ones."""
+    if not isinstance(value, str):
+        return []
+    keys = [part.strip() for part in value.split(",")]
+    return [k for k in keys if k and k.lower() != "null" and not any(c.isspace() for c in k)]
+
+
+def resolve_keys(service=None):
+    """(variable, keys) for a service: its own variable, then the shared one.
+
+    Each variable is read from the environment, then from ${CODDY_HOME}/.env,
+    the file Coddy loads at startup, so a key added there works at once. The
+    first source holding a usable key wins. Keys are never printed or stored.
+    """
+    own = KEY_VARIABLES[service or SERVICE]
+    dotenv = None
+    for name in (own, SHARED_KEY):
+        keys = usable_keys(os.environ.get(name))
+        if not keys:
+            if dotenv is None:
+                dotenv = read_dotenv(Path(os.environ.get("CODDY_HOME") or Path.home() / ".coddy").expanduser())
+            keys = usable_keys(dotenv.get(name))
+        if keys:
+            return name, keys
+    raise Blocked(f"No NeuralDeep key; ask the user to add {own} (or the shared {SHARED_KEY}) "
+                  "to ${CODDY_HOME:-~/.coddy}/.env, never to the chat")
 
 
 class NoRedirect(HTTPRedirectHandler):
@@ -184,6 +243,42 @@ def preflight(service, operation, key, units, model=None):
               "diarize": ("unit", "day", "month")}
     return {"observed_at": now(), "endpoint": HUB + QUOTAS[service],
             "units_required": units, "buckets": {k: quota[k] for k in fields[service]}}
+
+
+def choose_key(variable, keys, operation, units, model=None):
+    """The first key whose free preflight passes, with its quota observation.
+
+    The observation names the key by variable and number, never by value, so a
+    resume can find the key that submitted the job.
+    """
+    reasons = []
+    for index, key in enumerate(keys, 1):
+        try:
+            observed = preflight(SERVICE, operation, key, units, model=model)
+        except (Blocked, RequestError) as error:
+            reasons.append(str(error))
+            continue
+        observed["key"] = {"variable": variable, "index": index}
+        return key, observed
+    if len(reasons) == 1:
+        raise Blocked(reasons[0])
+    raise Blocked("; ".join(f"key {i}: {reason}" for i, reason in enumerate(reasons, 1)))
+
+
+def resume_key(state, variable, keys):
+    """The key that submitted a job, by the number its state recorded."""
+    observed = state.get("quota_observed")
+    record = observed.get("key") if isinstance(observed, dict) else None
+    if record is None:
+        return keys[0]  # a job attached with --job-id, or an older state
+    index = record.get("index") if isinstance(record, dict) else None
+    name = record.get("variable") if isinstance(record, dict) else None
+    if name == variable and type(index) is int and 1 <= index <= len(keys):
+        return keys[index - 1]
+    shown = name if isinstance(name, str) and re.fullmatch(r"[A-Z0-9_]{1,64}", name) else "an unknown variable"
+    number = index if type(index) is int else "?"
+    raise Blocked(f"The job was submitted with key {number} of {shown}, which is not configured now; "
+                  "restore it to resume, never submit again")
 
 
 def now():
@@ -604,14 +699,15 @@ def submission(args):
 def execute(args):
     if args.command == "merge":
         return merge_files(args)
-    key = resolve_key()
+    variable, keys = resolve_keys()
     units = 1
     if SERVICE == "ocr":
         units = args.pages * (2 if args.profile == "pro" else 1)
     elif SERVICE == "diarize":
         units = getattr(args, "minutes", 0)
     if args.command == "check":
-        return {"status": "ready", "quota_observed": preflight(SERVICE, args.operation, key, units, model=getattr(args, "model", None))}
+        _, observed = choose_key(variable, keys, args.operation, units, model=getattr(args, "model", None))
+        return {"status": "ready", "quota_observed": observed}
     if Path(args.state).resolve() == Path(args.output).resolve():
         raise Blocked("State and artifact paths must differ")
     if args.command == "run":
@@ -657,6 +753,7 @@ def execute(args):
             raise Blocked("State is not resumable; reconcile without submitting again")
         if state["service"] != SERVICE or state["status"] not in {"submitted", "timed_out", "poll_error"}:
             raise Blocked("State is not resumable; reconcile without submitting again")
+        key = resume_key(state, variable, keys)
     else:
         state = new_state(args.state, args.task_id, SERVICE)
     post_timeout = diarize_timeout(units) if SERVICE == "diarize" and type(units) is int else REQUEST_TIMEOUT
@@ -670,7 +767,7 @@ def execute(args):
             raise Blocked("Input file must differ from the state file")
         if args.command == "run":
             method, url, body, content_type = submission(args)
-            state["quota_observed"] = preflight(SERVICE, args.operation, key, units, model=getattr(args, "model", None))
+            key, state["quota_observed"] = choose_key(variable, keys, args.operation, units, model=getattr(args, "model", None))
             # An interruption from here until an ID is persisted requires reconciliation.
             state["status"] = "reconciliation_required"
             save_state(args.state, state)

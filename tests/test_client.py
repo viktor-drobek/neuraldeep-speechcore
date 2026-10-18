@@ -30,20 +30,52 @@ def quota(service):
 
 
 class SafetyTests(unittest.TestCase):
-    def test_auth_fallback_and_home(self):
-        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {"CODDY_HOME": tmp, "NEURALDEEP_API_KEY": "env-fixture"}, clear=True):
-            p = Path(tmp) / "providers/neuraldeep/neuraldeep-auth.json"
-            p.parent.mkdir(parents=True)
-            self.assertEqual(client.resolve_key(), "env-fixture")
-            for value in (None, "", "  ", "null", 1):
-                p.write_text(json.dumps({"api_key": value}), encoding="utf-8")
-                self.assertEqual(client.resolve_key(), "env-fixture")
-            p.write_text('{"api_key": "file-fixture"}', encoding="utf-8")
-            self.assertEqual(client.resolve_key(), "file-fixture")
-            p.write_text('{}', encoding="utf-8")
-            os.environ.pop("NEURALDEEP_API_KEY")
-            with self.assertRaises(client.Blocked):
-                client.resolve_key()
+    def test_keys_come_from_the_skill_variable_then_the_shared_one(self):
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {"CODDY_HOME": tmp}, clear=True):
+            dotenv = Path(tmp) / ".env"
+            # The Coddy provider file is no longer a source.
+            auth = Path(tmp) / "providers/neuraldeep/neuraldeep-auth.json"
+            auth.parent.mkdir(parents=True)
+            auth.write_text('{"api_key": "provider-file"}', encoding="utf-8")
+            with self.assertRaises(client.Blocked) as raised:
+                client.resolve_keys("diarize")
+            self.assertIn("NEURALDEEP_DIARIZATION_API_KEY", str(raised.exception))
+            self.assertIn(".env", str(raised.exception))
+            dotenv.write_text("NEURALDEEP_API_KEY=shared-file\n", encoding="utf-8")
+            self.assertEqual(client.resolve_keys("diarize"), ("NEURALDEEP_API_KEY", ["shared-file"]))
+            dotenv.write_text("NEURALDEEP_API_KEY=shared-file\nexport NEURALDEEP_DIARIZATION_API_KEY='own-a, own-b'\n",
+                              encoding="utf-8")
+            self.assertEqual(client.resolve_keys("diarize"), ("NEURALDEEP_DIARIZATION_API_KEY", ["own-a", "own-b"]))
+            os.environ["NEURALDEEP_DIARIZATION_API_KEY"] = "own-env"  # the environment wins, as in Coddy
+            self.assertEqual(client.resolve_keys("diarize"), ("NEURALDEEP_DIARIZATION_API_KEY", ["own-env"]))
+            for unusable in ("", "  ", "null", " , bad key ,NULL"):
+                os.environ["NEURALDEEP_DIARIZATION_API_KEY"] = unusable
+                self.assertEqual(client.resolve_keys("diarize"), ("NEURALDEEP_DIARIZATION_API_KEY", ["own-a", "own-b"]))
+            os.environ["NEURALDEEP_API_KEY"] = "shared-env"
+            dotenv.write_text("NEURALDEEP_SEARCH_API_KEY=search-only\n", encoding="utf-8")
+            self.assertEqual(client.resolve_keys("diarize"), ("NEURALDEEP_API_KEY", ["shared-env"]))
+            self.assertEqual(client.resolve_keys("search"), ("NEURALDEEP_SEARCH_API_KEY", ["search-only"]))
+            self.assertEqual(client.KEY_VARIABLES, {
+                "search": "NEURALDEEP_SEARCH_API_KEY", "ocr": "NEURALDEEP_OCR_API_KEY",
+                "images": "NEURALDEEP_IMAGES_API_KEY", "speechcore": "NEURALDEEP_SPEECHCORE_API_KEY",
+                "whisper": "NEURALDEEP_TRANSCRIPTIONS_API_KEY", "diarize": "NEURALDEEP_DIARIZATION_API_KEY"})
+            self.assertEqual(client.resolve_keys(), client.resolve_keys(client.SERVICE))
+
+    def test_dotenv_lines_parse_like_coddy(self):
+        # The cases of coddy-agent internal/config/dotenv_test.go.
+        cases = [("KEY=value", ("KEY", "value")), ("KEY=", ("KEY", "")), ("export KEY=value", ("KEY", "value")),
+                 ("export  KEY=value", ("KEY", "value")), ('KEY="hello world"', ("KEY", "hello world")),
+                 ("KEY='hello world'", ("KEY", "hello world")), ('KEY="a\\nb \\"q\\""', ("KEY", 'a\nb "q"')),
+                 ("KEY=value # comment", ("KEY", "value")), ("KEY=  value  ", ("KEY", "value")),
+                 ("# this is a comment", None), ("  # indented comment", None), ("", None), ("   ", None),
+                 ("KEYONLY", None), ("KEY NAME=val", None), ("=value", None)]
+        for line, expected in cases:
+            with self.subTest(line=line):
+                self.assertEqual(client.parse_dotenv_line(line), expected)
+        with tempfile.TemporaryDirectory() as tmp:
+            Path(tmp, ".env").write_text("A=first\nA=second\nB='x'\n", encoding="utf-8")
+            self.assertEqual(client.read_dotenv(tmp), {"A": "first", "B": "x"})  # the first one wins, as in Coddy
+            self.assertEqual(client.read_dotenv(Path(tmp) / "missing"), {})
 
     def test_guard_ignores_chat_but_checks_service(self):
         for service, op in (("search", "web"), ("images", "generate"), ("ocr", "extract")):
@@ -97,7 +129,7 @@ class SafetyTests(unittest.TestCase):
         import sys
         self.assertEqual(client.DEFAULT_TRANSCRIPTION_MODEL, "gigaam-v3")
         price = {"prices": [{"model": "gigaam-v3", "premium": False}]}
-        with patch.object(client, "SERVICE", "whisper"), patch.object(client, "resolve_key", return_value="fixture"), \
+        with patch.object(client, "SERVICE", "whisper"), patch.object(client, "resolve_keys", return_value=("NEURALDEEP_API_KEY", ["fixture"])), \
                 patch.object(client, "request", side_effect=[limits(), price]), \
                 patch.object(sys, "argv", ["client.py", "check"]), patch("sys.stdout", new_callable=io.StringIO) as out:
             self.assertEqual(client.main(), 1)
@@ -115,13 +147,13 @@ class SafetyTests(unittest.TestCase):
         import io
         import sys
         price = {"prices": [{"model": "gigaam-v3", "premium": False}]}
-        with patch.object(client, "SERVICE", "whisper"), patch.object(client, "resolve_key", return_value="fixture"), \
+        with patch.object(client, "SERVICE", "whisper"), patch.object(client, "resolve_keys", return_value=("NEURALDEEP_API_KEY", ["fixture"])), \
                 patch.object(client, "request", side_effect=[limits(), price]) as req, \
                 patch.object(sys, "argv", ["client.py", "check", "--model", "gigaam-v3"]), patch("sys.stdout", new_callable=io.StringIO) as out:
             self.assertEqual(client.main(), 1)
         self.assertIn("gigaam-v3 remaining-quota endpoint unverified", json.loads(out.getvalue())["errors"][0])
         self.assertEqual([c.args[:2] for c in req.call_args_list], [("GET", client.HUB + "/limits"), ("GET", client.PRICES)])
-        with tempfile.TemporaryDirectory() as tmp, patch.object(client, "SERVICE", "whisper"), patch.object(client, "resolve_key", return_value="fixture"), \
+        with tempfile.TemporaryDirectory() as tmp, patch.object(client, "SERVICE", "whisper"), patch.object(client, "resolve_keys", return_value=("NEURALDEEP_API_KEY", ["fixture"])), \
                 patch.object(client, "request") as req, patch("sys.stdout", new_callable=io.StringIO) as out, \
                 patch.object(sys, "argv", ["client.py", "run", "--model", "whisper-podlodka-turbo", "--file", str(Path(tmp) / "a.wav"),
                                            "--state", str(Path(tmp) / "s.json"), "--output", str(Path(tmp) / "t.json")]):
@@ -201,7 +233,7 @@ class SafetyTests(unittest.TestCase):
         self.assertNotIn("secret-fixture", str(raised.exception))
 
     def test_ocr_run_completes_through_unknown_intermediate_status(self):
-        with tempfile.TemporaryDirectory() as tmp, patch.object(client, "SERVICE", "ocr"), patch.object(client, "resolve_key", return_value="fixture"), patch.object(client, "preflight", return_value={}), patch.object(client.time, "sleep"):
+        with tempfile.TemporaryDirectory() as tmp, patch.object(client, "SERVICE", "ocr"), patch.object(client, "resolve_keys", return_value=("NEURALDEEP_API_KEY", ["fixture"])), patch.object(client, "preflight", return_value={}), patch.object(client.time, "sleep"):
             args = self.args(tmp)
             args.operation, args.file = "extract", str(Path(tmp) / "invoice.pdf")
             Path(args.file).write_bytes(b"%PDF-1.4 fixture")
@@ -270,14 +302,14 @@ class SafetyTests(unittest.TestCase):
                          output=str(Path(tmp)/"result.bin"), task_id="task-fixture", job_id=None, timeout=10)
 
     def test_preflight_http_failure_is_blocked_without_post(self):
-        with tempfile.TemporaryDirectory() as tmp, patch.object(client, "SERVICE", "images"), patch.object(client, "resolve_key", return_value="fixture"):
+        with tempfile.TemporaryDirectory() as tmp, patch.object(client, "SERVICE", "images"), patch.object(client, "resolve_keys", return_value=("NEURALDEEP_API_KEY", ["fixture"])):
             with patch.object(client, "request", side_effect=client.RequestError("HTTP 503")) as req:
                 result = client.execute(self.args(tmp))
             self.assertEqual(result["status"], "blocked")
             self.assertEqual([c.args[0] for c in req.call_args_list], ["GET"])
 
     def test_ambiguous_submission_has_no_retry(self):
-        with tempfile.TemporaryDirectory() as tmp, patch.object(client, "SERVICE", "images"), patch.object(client, "resolve_key", return_value="fixture"), patch.object(client, "preflight", return_value={}):
+        with tempfile.TemporaryDirectory() as tmp, patch.object(client, "SERVICE", "images"), patch.object(client, "resolve_keys", return_value=("NEURALDEEP_API_KEY", ["fixture"])), patch.object(client, "preflight", return_value={}):
             with patch.object(client, "request", side_effect=client.RequestError("Transport error")) as req:
                 result = client.execute(self.args(tmp))
             self.assertEqual(result["status"], "reconciliation_required")
@@ -285,7 +317,7 @@ class SafetyTests(unittest.TestCase):
             self.assertEqual(result["artifacts"], [])
 
     def test_provider_id_saved_before_poll_and_failed_never_downloads(self):
-        with tempfile.TemporaryDirectory() as tmp, patch.object(client, "SERVICE", "images"), patch.object(client, "resolve_key", return_value="fixture"), patch.object(client, "preflight", return_value={}):
+        with tempfile.TemporaryDirectory() as tmp, patch.object(client, "SERVICE", "images"), patch.object(client, "resolve_keys", return_value=("NEURALDEEP_API_KEY", ["fixture"])), patch.object(client, "preflight", return_value={}):
             args = self.args(tmp)
             def respond(method, url, *a, **kw):
                 if method == "POST":
@@ -301,7 +333,7 @@ class SafetyTests(unittest.TestCase):
             self.assertFalse(Path(args.output).exists())
 
     def test_ocr_pro_requires_double_pages(self):
-        with tempfile.TemporaryDirectory() as tmp, patch.object(client, "SERVICE", "ocr"), patch.object(client, "resolve_key", return_value="fixture"):
+        with tempfile.TemporaryDirectory() as tmp, patch.object(client, "SERVICE", "ocr"), patch.object(client, "resolve_keys", return_value=("NEURALDEEP_API_KEY", ["fixture"])):
             args = self.args(tmp)
             args.command, args.operation, args.profile, args.pages = "check", "extract", "pro", 4
             with patch.object(client, "preflight", return_value={}) as pre:
@@ -325,7 +357,7 @@ class SafetyTests(unittest.TestCase):
 
     def test_all_image_operations_are_async(self):
         for operation in client.OPERATIONS["images"]:
-            with self.subTest(operation=operation), tempfile.TemporaryDirectory() as tmp, patch.object(client, "SERVICE", "images"), patch.object(client, "resolve_key", return_value="fixture"), patch.object(client, "preflight", return_value={}):
+            with self.subTest(operation=operation), tempfile.TemporaryDirectory() as tmp, patch.object(client, "SERVICE", "images"), patch.object(client, "resolve_keys", return_value=("NEURALDEEP_API_KEY", ["fixture"])), patch.object(client, "preflight", return_value={}):
                 args = self.args(tmp)
                 args.operation = operation
                 args.file = str(Path(tmp)/"input.png")
@@ -364,7 +396,7 @@ class SafetyTests(unittest.TestCase):
                    ("ocr", (b"<html>maintenance</html>", "text/html")),
                    ("speechcore", (b"", "application/json"))]
         for service, response in invalid:
-            with self.subTest(service=service), tempfile.TemporaryDirectory() as tmp, patch.object(client, "SERVICE", service), patch.object(client, "resolve_key", return_value="fixture"):
+            with self.subTest(service=service), tempfile.TemporaryDirectory() as tmp, patch.object(client, "SERVICE", service), patch.object(client, "resolve_keys", return_value=("NEURALDEEP_API_KEY", ["fixture"])):
                 args = self.args(tmp)
                 args.command, args.job_id = "resume", "job-fixture"
                 with patch.object(client, "poll", return_value=response):
@@ -390,7 +422,7 @@ class SafetyTests(unittest.TestCase):
                            "segments": [{"speaker": "SPEAKER_00", "text": "hello", "start": 0, "end": 2.5}]}).encode()
 
     def test_speechcore_resume_polls_until_completed_and_saves_transcript(self):
-        with tempfile.TemporaryDirectory() as tmp, patch.object(client, "SERVICE", "speechcore"), patch.object(client, "resolve_key", return_value="fixture"), patch.object(client.time, "sleep"):
+        with tempfile.TemporaryDirectory() as tmp, patch.object(client, "SERVICE", "speechcore"), patch.object(client, "resolve_keys", return_value=("NEURALDEEP_API_KEY", ["fixture"])), patch.object(client.time, "sleep"):
             args = self.args(tmp)
             args.command, args.operation, args.job_id = "resume", "upload", "job-fixture"
             data = self.transcript()
@@ -409,7 +441,7 @@ class SafetyTests(unittest.TestCase):
             self.assertEqual(json.loads(Path(args.state).read_text(encoding="utf-8"))["status"], "completed")
 
     def test_resume_from_existing_state_file(self):
-        with tempfile.TemporaryDirectory() as tmp, patch.object(client, "SERVICE", "speechcore"), patch.object(client, "resolve_key", return_value="fixture"):
+        with tempfile.TemporaryDirectory() as tmp, patch.object(client, "SERVICE", "speechcore"), patch.object(client, "resolve_keys", return_value=("NEURALDEEP_API_KEY", ["fixture"])):
             args = self.args(tmp)
             args.command, args.operation = "resume", "upload"
             state = client.state_template("task-fixture", "speechcore")
@@ -426,7 +458,7 @@ class SafetyTests(unittest.TestCase):
 
     def test_resume_refuses_non_resumable_state_without_requests(self):
         for status in ("completed", "blocked", "failed", "reconciliation_required"):
-            with self.subTest(status=status), tempfile.TemporaryDirectory() as tmp, patch.object(client, "SERVICE", "speechcore"), patch.object(client, "resolve_key", return_value="fixture"):
+            with self.subTest(status=status), tempfile.TemporaryDirectory() as tmp, patch.object(client, "SERVICE", "speechcore"), patch.object(client, "resolve_keys", return_value=("NEURALDEEP_API_KEY", ["fixture"])):
                 args = self.args(tmp)
                 args.command, args.operation = "resume", "upload"
                 state = client.state_template("task-fixture", "speechcore")
@@ -442,7 +474,7 @@ class SafetyTests(unittest.TestCase):
                  ("ocr", "extract", "id", {"status": "completed"}, (b'{"content": "text"}', "application/json")),
                  ("images", "generate", "task_uid", {"status": "finished"}, (b"\x89PNG\r\n\x1a\n" + b"0" * 24, "image/png"))]
         for service, operation, field, status, result_body in cases:
-            with self.subTest(service=service), tempfile.TemporaryDirectory() as tmp, patch.object(client, "SERVICE", service), patch.object(client, "resolve_key", return_value="fixture"), patch.object(client, "preflight", return_value={}), patch.object(client, "submission", return_value=("POST", "https://api.neuraldeep.ru/v1/x", b"", "application/json")):
+            with self.subTest(service=service), tempfile.TemporaryDirectory() as tmp, patch.object(client, "SERVICE", service), patch.object(client, "resolve_keys", return_value=("NEURALDEEP_API_KEY", ["fixture"])), patch.object(client, "preflight", return_value={}), patch.object(client, "submission", return_value=("POST", "https://api.neuraldeep.ru/v1/x", b"", "application/json")):
                 args = self.args(tmp)
                 args.operation = operation
                 with patch.object(client, "request", side_effect=[{field: "job-fixture"}, status, result_body]):
@@ -450,7 +482,7 @@ class SafetyTests(unittest.TestCase):
                 self.assertEqual(result["status"], "completed")
                 self.assertEqual(result["provider_job_id"], "job-fixture")
         # A field belonging to another service is not accepted as the provider ID.
-        with tempfile.TemporaryDirectory() as tmp, patch.object(client, "SERVICE", "speechcore"), patch.object(client, "resolve_key", return_value="fixture"), patch.object(client, "preflight", return_value={}), patch.object(client, "submission", return_value=("POST", client.SPEECH + "/upload", b"", "application/json")):
+        with tempfile.TemporaryDirectory() as tmp, patch.object(client, "SERVICE", "speechcore"), patch.object(client, "resolve_keys", return_value=("NEURALDEEP_API_KEY", ["fixture"])), patch.object(client, "preflight", return_value={}), patch.object(client, "submission", return_value=("POST", client.SPEECH + "/upload", b"", "application/json")):
             args = self.args(tmp)
             args.operation = "upload"
             with patch.object(client, "request", return_value={"id": "job-fixture"}) as req:
@@ -488,7 +520,7 @@ class SafetyTests(unittest.TestCase):
         if client.SERVICE not in client.SYNCHRONOUS:
             # Synchronous services refuse --job-id before opening any state file.
             cases.append(["resume", "--job-id", "job-other"])
-        with tempfile.TemporaryDirectory() as tmp, patch.object(client, "resolve_key", return_value="fixture"):
+        with tempfile.TemporaryDirectory() as tmp, patch.object(client, "resolve_keys", return_value=("NEURALDEEP_API_KEY", ["fixture"])):
             state = Path(tmp) / "state.json"
             state.write_text('{"provider_job_id": "job-fixture"}', encoding="utf-8")
             paths = ["--state", str(state), "--output", str(Path(tmp) / "result.json")]
@@ -535,9 +567,9 @@ class SafetyTests(unittest.TestCase):
             def utf8_json(path, value):
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_bytes(json.dumps(value, ensure_ascii=False).encode("utf-8"))
-            utf8_json(tmp / "providers/neuraldeep/neuraldeep-auth.json", {"api_key": "file-fixture", "name": text})
+            (tmp / ".env").write_bytes(("# " + text + "\\nNAME=" + text + "\\nNEURALDEEP_OCR_API_KEY=file-fixture\\n").encode("utf-8"))
             with patch.dict("os.environ", {"CODDY_HOME": str(tmp)}, clear=True):
-                attempt("key", client.resolve_key)
+                attempt("key", lambda: client.resolve_keys("ocr")[1][0])
             utf8_json(tmp / "payload.json", {"query": text})
             with patch.object(client, "SERVICE", "search"):
                 args = Namespace(payload=str(tmp / "payload.json"), operation="web", file=None, profile="fast")
@@ -549,7 +581,7 @@ class SafetyTests(unittest.TestCase):
                              state=str(tmp / "state.json"), output=str(tmp / "result.json"), task_id="task-fixture",
                              job_id=None, timeout=10)
             responses = [{"status": "completed"}, (b'{"content": "text"}', "application/json")]
-            with patch.object(client, "SERVICE", "ocr"), patch.object(client, "resolve_key", return_value="fixture"), \\
+            with patch.object(client, "SERVICE", "ocr"), patch.object(client, "resolve_keys", return_value=("NEURALDEEP_API_KEY", ["fixture"])), \\
                     patch.object(client, "request", side_effect=responses):
                 attempt("resume", lambda: client.execute(args)["status"])
             utf8_json(tmp / "d.json", {"duration": 2.0, "num_speakers": 1, "minutes_charged": 1,
@@ -625,7 +657,7 @@ class SafetyTests(unittest.TestCase):
 
     def test_timeout_then_resume_from_saved_state_without_resubmitting(self):
         png = b"\x89PNG\r\n\x1a\n" + b"0" * 24
-        with tempfile.TemporaryDirectory() as tmp, patch.object(client, "SERVICE", "images"), patch.object(client, "resolve_key", return_value="fixture"), patch.object(client, "preflight", return_value={}) as pre:
+        with tempfile.TemporaryDirectory() as tmp, patch.object(client, "SERVICE", "images"), patch.object(client, "resolve_keys", return_value=("NEURALDEEP_API_KEY", ["fixture"])), patch.object(client, "preflight", return_value={}) as pre:
             args = self.args(tmp)
             # Deadline set at 0; the fifth clock read is past the 10-second timeout.
             clock = iter([0, 0, 0, 0, 11])
@@ -652,7 +684,7 @@ class SafetyTests(unittest.TestCase):
     def test_resume_refuses_non_resumable_state(self):
         cases = [("images", s) for s in ("reconciliation_required", "failed", "completed", "blocked")] + [("ocr", "timed_out")]
         for service, status in cases:
-            with self.subTest(service=service, status=status), tempfile.TemporaryDirectory() as tmp, patch.object(client, "SERVICE", "images"), patch.object(client, "resolve_key", return_value="fixture"):
+            with self.subTest(service=service, status=status), tempfile.TemporaryDirectory() as tmp, patch.object(client, "SERVICE", "images"), patch.object(client, "resolve_keys", return_value=("NEURALDEEP_API_KEY", ["fixture"])):
                 args = self.args(tmp)
                 args.command = "resume"
                 state = client.state_template("task-fixture", service)
@@ -713,7 +745,7 @@ class SafetyTests(unittest.TestCase):
         import io
         import sys
         for status in ("submitted", "timed_out", "poll_error"):
-            with self.subTest(status=status), tempfile.TemporaryDirectory() as tmp, patch.object(client, "resolve_key", return_value="fixture"):
+            with self.subTest(status=status), tempfile.TemporaryDirectory() as tmp, patch.object(client, "resolve_keys", return_value=("NEURALDEEP_API_KEY", ["fixture"])):
                 state, output = Path(tmp) / "state.json", Path(tmp) / "result.json"
                 saved = client.state_template("task-fixture", "search")
                 saved.update(status=status, provider_job_id="job-fixture")
@@ -735,7 +767,7 @@ class SafetyTests(unittest.TestCase):
         cases = ["[]", "null", '"x"', '{"service": "speechcore", "status": []}',
                  '{"service": "speechcore", "status": "submitted", "provider_job_id": "job-fixture", "errors": "x"}']
         for text in cases:
-            with self.subTest(state=text), tempfile.TemporaryDirectory() as tmp, patch.object(client, "resolve_key", return_value="fixture"):
+            with self.subTest(state=text), tempfile.TemporaryDirectory() as tmp, patch.object(client, "resolve_keys", return_value=("NEURALDEEP_API_KEY", ["fixture"])):
                 state, output = Path(tmp) / "state.json", Path(tmp) / "result.json"
                 state.write_text(text, encoding="utf-8")
                 argv = ["client.py", "resume", "--state", str(state), "--output", str(output)]
@@ -752,7 +784,7 @@ class SafetyTests(unittest.TestCase):
         import io
         import sys
         self.assertIn("whisper", client.SYNCHRONOUS)
-        with tempfile.TemporaryDirectory() as tmp, patch.object(client, "SERVICE", "whisper"), patch.object(client, "resolve_key", return_value="fixture"):
+        with tempfile.TemporaryDirectory() as tmp, patch.object(client, "SERVICE", "whisper"), patch.object(client, "resolve_keys", return_value=("NEURALDEEP_API_KEY", ["fixture"])):
             state = Path(tmp) / "state.json"
             argv = ["client.py", "resume", "--job-id", "job-fixture", "--state", str(state), "--output", str(Path(tmp) / "result.json")]
             with patch.object(client, "request") as req, patch.object(sys, "argv", argv), patch("sys.stdout", new_callable=io.StringIO) as out:
@@ -766,7 +798,7 @@ class SafetyTests(unittest.TestCase):
     def test_whisper_run_is_blocked_before_any_request(self):
         import io
         import sys
-        with tempfile.TemporaryDirectory() as tmp, patch.object(client, "SERVICE", "whisper"), patch.object(client, "resolve_key", return_value="fixture"):
+        with tempfile.TemporaryDirectory() as tmp, patch.object(client, "SERVICE", "whisper"), patch.object(client, "resolve_keys", return_value=("NEURALDEEP_API_KEY", ["fixture"])):
             output = Path(tmp) / "result.json"
             argv = ["client.py", "run", "transcribe", "--file", str(Path(tmp) / "missing.wav"),
                     "--state", str(Path(tmp) / "state.json"), "--output", str(output)]
@@ -847,7 +879,7 @@ class SafetyTests(unittest.TestCase):
 
     def test_diarize_run_posts_audio_once_and_saves_validated_json(self):
         with tempfile.TemporaryDirectory() as tmp, patch.object(client, "SERVICE", "diarize"), \
-                patch.object(client, "resolve_key", return_value="fixture"), \
+                patch.object(client, "resolve_keys", return_value=("NEURALDEEP_API_KEY", ["fixture"])), \
                 patch.object(client, "preflight", return_value={"units_required": 2}) as pre:
             args = self.diarize_args(tmp)
             sent = []
@@ -882,7 +914,7 @@ class SafetyTests(unittest.TestCase):
                  dict(good, error="unavailable")]
         for response in cases:
             with self.subTest(response=response), tempfile.TemporaryDirectory() as tmp, \
-                    patch.object(client, "SERVICE", "diarize"), patch.object(client, "resolve_key", return_value="fixture"), \
+                    patch.object(client, "SERVICE", "diarize"), patch.object(client, "resolve_keys", return_value=("NEURALDEEP_API_KEY", ["fixture"])), \
                     patch.object(client, "preflight", return_value={}):
                 args = self.diarize_args(tmp)
                 with patch.object(client, "request", return_value=response) as req:
@@ -898,7 +930,7 @@ class SafetyTests(unittest.TestCase):
         cases = {"no file": dict(file=None), "payload": dict(payload="extra.json"), "too large": dict()}
         for case, changes in cases.items():
             with self.subTest(case=case), tempfile.TemporaryDirectory() as tmp, \
-                    patch.object(client, "SERVICE", "diarize"), patch.object(client, "resolve_key", return_value="fixture"), \
+                    patch.object(client, "SERVICE", "diarize"), patch.object(client, "resolve_keys", return_value=("NEURALDEEP_API_KEY", ["fixture"])), \
                     patch.dict(client.UPLOAD_LIMITS, {"diarize": 4}):
                 args = self.diarize_args(tmp)
                 if case == "payload":
@@ -917,7 +949,7 @@ class SafetyTests(unittest.TestCase):
     def test_diarize_is_synchronous_and_refuses_resume(self):
         import io
         import sys
-        with tempfile.TemporaryDirectory() as tmp, patch.object(client, "SERVICE", "diarize"), patch.object(client, "resolve_key", return_value="fixture"):
+        with tempfile.TemporaryDirectory() as tmp, patch.object(client, "SERVICE", "diarize"), patch.object(client, "resolve_keys", return_value=("NEURALDEEP_API_KEY", ["fixture"])):
             state = Path(tmp) / "state.json"
             argv = ["client.py", "resume", "--job-id", "job-fixture", "--state", str(state), "--output", str(Path(tmp) / "result.json")]
             with patch.object(client, "request") as req, patch.object(sys, "argv", argv), patch("sys.stdout", new_callable=io.StringIO) as out:
@@ -933,7 +965,7 @@ class SafetyTests(unittest.TestCase):
         price = {"prices": [{"model": "audio:diarize", "premium": False}]}
         for minutes, expected, code in (("7", "ready", 0), ("0", "blocked", 1)):
             with self.subTest(minutes=minutes), patch.object(client, "SERVICE", "diarize"), \
-                    patch.object(client, "resolve_key", return_value="fixture"), \
+                    patch.object(client, "resolve_keys", return_value=("NEURALDEEP_API_KEY", ["fixture"])), \
                     patch.object(client, "request", side_effect=[limits(), price, self.diarize_quota()]), \
                     patch.object(sys, "argv", ["client.py", "check", "--minutes", minutes]), patch("sys.stdout", new_callable=io.StringIO) as out:
                 self.assertEqual(client.main(), code)
@@ -951,7 +983,7 @@ class SafetyTests(unittest.TestCase):
                  ("diarize", ["check", "--transcript", "t.json"])]
         for service, argv in cases:
             with self.subTest(service=service, argv=argv), patch.object(client, "SERVICE", service), \
-                    patch.object(client, "request") as req, patch.object(client, "resolve_key") as key, \
+                    patch.object(client, "request") as req, patch.object(client, "resolve_keys") as key, \
                     patch.object(sys, "argv", ["client.py", *argv]), patch("sys.stdout", new_callable=io.StringIO), \
                     patch("sys.stderr", new_callable=io.StringIO):
                 with self.assertRaises(SystemExit) as raised:
@@ -1009,7 +1041,7 @@ class SafetyTests(unittest.TestCase):
             t.write_text(json.dumps(transcript, ensure_ascii=False), encoding="utf-8")
             argv += ["--transcript", str(t)]
         with patch.object(client, "SERVICE", "diarize"), patch.object(client, "request") as req, \
-                patch.object(client, "resolve_key") as key, patch.object(sys, "argv", argv), \
+                patch.object(client, "resolve_keys") as key, patch.object(sys, "argv", argv), \
                 patch("sys.stdout", new_callable=io.StringIO) as out:
             code = client.main()
         req.assert_not_called()
@@ -1114,7 +1146,7 @@ class SafetyTests(unittest.TestCase):
     def test_diarize_post_waits_longer_than_the_default_timeout(self):
         for minutes, seconds in ((3, 120), (10, 300), (240, 7200)):
             with self.subTest(minutes=minutes), tempfile.TemporaryDirectory() as tmp, \
-                    patch.object(client, "SERVICE", "diarize"), patch.object(client, "resolve_key", return_value="fixture"), \
+                    patch.object(client, "SERVICE", "diarize"), patch.object(client, "resolve_keys", return_value=("NEURALDEEP_API_KEY", ["fixture"])), \
                     patch.object(client, "preflight", return_value={}):
                 args = self.diarize_args(tmp, minutes=minutes)
                 with patch.object(client, "request", return_value=self.diarization()) as req:
@@ -1130,7 +1162,7 @@ class SafetyTests(unittest.TestCase):
         for case in cases:
             for service in ("diarize", "ocr"):
                 with self.subTest(case=case, service=service), tempfile.TemporaryDirectory() as tmp, \
-                        patch.object(client, "SERVICE", service), patch.object(client, "resolve_key", return_value="fixture"):
+                        patch.object(client, "SERVICE", service), patch.object(client, "resolve_keys", return_value=("NEURALDEEP_API_KEY", ["fixture"])):
                     args = self.diarize_args(tmp)
                     args.operation = client.OPERATIONS[service][0]
                     locked = Path(tmp) / "locked"
@@ -1199,7 +1231,7 @@ class SafetyTests(unittest.TestCase):
         with self.assertRaises(client.Blocked):
             client.merge_transcript(dict(self.diarization(), duration=10 ** 400), self.transcript_json())
         with tempfile.TemporaryDirectory() as tmp, patch.object(client, "SERVICE", "diarize"), \
-                patch.object(client, "resolve_key", return_value="fixture"), patch.object(client, "preflight", return_value={}):
+                patch.object(client, "resolve_keys", return_value=("NEURALDEEP_API_KEY", ["fixture"])), patch.object(client, "preflight", return_value={}):
             args = self.diarize_args(tmp)
             with patch.object(client, "request", return_value=dict(self.diarization(), duration=10 ** 400)):
                 result = client.execute(args)
@@ -1242,7 +1274,7 @@ class SafetyTests(unittest.TestCase):
     # Fourth cross-review (2026-10-18).
     def test_run_blocks_an_output_another_user_owns_in_a_sticky_directory(self):
         with tempfile.TemporaryDirectory() as tmp, patch.object(client, "SERVICE", "diarize"), \
-                patch.object(client, "resolve_key", return_value="fixture"):
+                patch.object(client, "resolve_keys", return_value=("NEURALDEEP_API_KEY", ["fixture"])):
             sticky = Path(tmp) / "shared"
             sticky.mkdir()
             sticky.chmod(0o1777)
@@ -1293,7 +1325,7 @@ class SafetyTests(unittest.TestCase):
     # Fifth cross-review (2026-10-18).
     def test_run_blocks_an_output_name_the_system_refuses(self):
         with tempfile.TemporaryDirectory() as tmp, patch.object(client, "SERVICE", "diarize"), \
-                patch.object(client, "resolve_key", return_value="fixture"):
+                patch.object(client, "resolve_keys", return_value=("NEURALDEEP_API_KEY", ["fixture"])):
             args = self.diarize_args(tmp)
             args.output = str(Path(tmp) / ("x" * 256 + ".json"))
             with patch.object(client, "request") as req, self.assertRaises(client.Blocked) as raised:
@@ -1303,7 +1335,7 @@ class SafetyTests(unittest.TestCase):
 
     def test_aliases_of_an_input_are_refused_as_output(self):
         with tempfile.TemporaryDirectory() as tmp, patch.object(client, "SERVICE", "diarize"), \
-                patch.object(client, "resolve_key", return_value="fixture"):
+                patch.object(client, "resolve_keys", return_value=("NEURALDEEP_API_KEY", ["fixture"])):
             args = self.diarize_args(tmp)
             alias = Path(tmp) / "alias.mp3"
             os.link(args.file, alias)  # a hard link resolves to a different path
@@ -1337,7 +1369,7 @@ class SafetyTests(unittest.TestCase):
     def test_a_valid_answer_with_a_lone_surrogate_is_still_saved(self):
         answer = dict(self.diarization(), segments=[{"speaker": "\ud83d", "start": 1.0, "end": 2.0}])
         with tempfile.TemporaryDirectory() as tmp, patch.object(client, "SERVICE", "diarize"), \
-                patch.object(client, "resolve_key", return_value="fixture"), patch.object(client, "preflight", return_value={}):
+                patch.object(client, "resolve_keys", return_value=("NEURALDEEP_API_KEY", ["fixture"])), patch.object(client, "preflight", return_value={}):
             args = self.diarize_args(tmp)
             with patch.object(client, "request", return_value=answer):
                 result = client.execute(args)
@@ -1356,7 +1388,7 @@ class SafetyTests(unittest.TestCase):
             return real_samefile(a, b)
 
         with tempfile.TemporaryDirectory() as tmp, patch.object(client, "SERVICE", "diarize"), \
-                patch.object(client, "resolve_key", return_value="fixture"), \
+                patch.object(client, "resolve_keys", return_value=("NEURALDEEP_API_KEY", ["fixture"])), \
                 patch.object(client.os.path, "samefile", side_effect=case_insensitive):
             args = self.diarize_args(tmp)
             args.state, args.output = str(Path(tmp) / "Diarization.json"), str(Path(tmp) / "diarization.json")
@@ -1370,7 +1402,7 @@ class SafetyTests(unittest.TestCase):
     def test_run_probes_that_the_output_name_can_be_created(self):
         real_open = os.open
         with tempfile.TemporaryDirectory() as tmp, patch.object(client, "SERVICE", "diarize"), \
-                patch.object(client, "resolve_key", return_value="fixture"):
+                patch.object(client, "resolve_keys", return_value=("NEURALDEEP_API_KEY", ["fixture"])):
             args = self.diarize_args(tmp)
             args.output = str(Path(tmp) / "meeting:1.json")
 
@@ -1401,7 +1433,7 @@ class SafetyTests(unittest.TestCase):
     def test_input_file_that_is_the_state_file_is_never_sent(self):
         for service, via in (("diarize", "same path"), ("ocr", "same path"), ("diarize", "symlink")):
             with self.subTest(service=service, via=via), tempfile.TemporaryDirectory() as tmp, \
-                    patch.object(client, "SERVICE", service), patch.object(client, "resolve_key", return_value="fixture"):
+                    patch.object(client, "SERVICE", service), patch.object(client, "resolve_keys", return_value=("NEURALDEEP_API_KEY", ["fixture"])):
                 args = self.diarize_args(tmp)
                 args.operation = client.OPERATIONS[service][0]
                 args.file = args.state = str(Path(tmp) / "x.json")  # does not exist yet
@@ -1525,7 +1557,7 @@ class SafetyTests(unittest.TestCase):
         for case in cases:
             for service in ("diarize", "ocr"):
                 with self.subTest(case=case, service=service), tempfile.TemporaryDirectory() as tmp, \
-                        patch.object(client, "SERVICE", service), patch.object(client, "resolve_key", return_value="fixture"):
+                        patch.object(client, "SERVICE", service), patch.object(client, "resolve_keys", return_value=("NEURALDEEP_API_KEY", ["fixture"])):
                     args = self.diarize_args(tmp)
                     args.operation = client.OPERATIONS[service][0]
                     if case == "directory":
@@ -1555,7 +1587,7 @@ class SafetyTests(unittest.TestCase):
             return bodies[-1]
 
         with tempfile.TemporaryDirectory() as tmp, patch.object(client, "SERVICE", "diarize"), \
-                patch.object(client, "resolve_key", return_value="fixture"), patch.object(client, "multipart", side_effect=keep), \
+                patch.object(client, "resolve_keys", return_value=("NEURALDEEP_API_KEY", ["fixture"])), patch.object(client, "multipart", side_effect=keep), \
                 patch.object(client, "preflight", side_effect=client.Blocked("Insufficient or invalid service quota")):
             result = client.execute(self.diarize_args(tmp))
         self.assertEqual(result["status"], "blocked")
@@ -1572,6 +1604,80 @@ class SafetyTests(unittest.TestCase):
                 self.assertTrue(os.get_blocking(body.file.fileno()))
             finally:
                 body.close()
+
+    # Per-skill keys (2026-10-18): several keys, the first that passes is used.
+    def test_check_tries_keys_in_order_and_names_the_one_used(self):
+        import io
+        import sys
+        keys = ("NEURALDEEP_DIARIZATION_API_KEY", ["key-one-secret", "key-two-secret"])
+        answers = [client.Blocked("Insufficient or invalid service quota"), {"units_required": 2}]
+        with patch.object(client, "SERVICE", "diarize"), patch.object(client, "resolve_keys", return_value=keys), \
+                patch.object(client, "preflight", side_effect=answers) as pre, \
+                patch.object(sys, "argv", ["client.py", "check", "--minutes", "2"]), patch("sys.stdout", new_callable=io.StringIO) as out:
+            self.assertEqual(client.main(), 0)
+        result = json.loads(out.getvalue())
+        self.assertEqual(result["status"], "ready")
+        self.assertEqual(result["quota_observed"]["key"], {"variable": "NEURALDEEP_DIARIZATION_API_KEY", "index": 2})
+        self.assertEqual([c.args[2] for c in pre.call_args_list], ["key-one-secret", "key-two-secret"])
+        self.assertNotIn("secret", out.getvalue())
+        answers = [client.Blocked("Insufficient or invalid service quota"), client.RequestError("HTTP 401; no automatic retry")]
+        with patch.object(client, "SERVICE", "diarize"), patch.object(client, "resolve_keys", return_value=keys), \
+                patch.object(client, "preflight", side_effect=answers), \
+                patch.object(sys, "argv", ["client.py", "check", "--minutes", "2"]), patch("sys.stdout", new_callable=io.StringIO) as out:
+            self.assertEqual(client.main(), 1)
+        result = json.loads(out.getvalue())
+        self.assertEqual(result["status"], "blocked")
+        self.assertEqual(result["errors"], ["key 1: Insufficient or invalid service quota; key 2: HTTP 401; no automatic retry"])
+        self.assertNotIn("secret", out.getvalue())
+
+    def test_run_posts_with_the_first_key_that_passes_and_records_its_number(self):
+        keys = ("NEURALDEEP_DIARIZATION_API_KEY", ["key-one-secret", "key-two-secret"])
+        with tempfile.TemporaryDirectory() as tmp, patch.object(client, "SERVICE", "diarize"), \
+                patch.object(client, "resolve_keys", return_value=keys), \
+                patch.object(client, "preflight", side_effect=[client.Blocked("Insufficient or invalid service quota"),
+                                                               {"units_required": 2}]):
+            args = self.diarize_args(tmp)
+            with patch.object(client, "request", return_value=self.diarization()) as req:
+                result = client.execute(args)
+            saved = Path(args.state).read_text(encoding="utf-8")
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(req.call_args.args[2], "key-two-secret")
+        self.assertEqual(json.loads(saved)["quota_observed"]["key"], {"variable": "NEURALDEEP_DIARIZATION_API_KEY", "index": 2})
+        self.assertNotIn("secret", saved)
+
+    def test_resume_uses_the_key_that_submitted_the_job(self):
+        def resume(keys, recorded, blocked=False):
+            with tempfile.TemporaryDirectory() as tmp, patch.object(client, "SERVICE", "speechcore"), \
+                    patch.object(client, "resolve_keys", return_value=keys):
+                args = self.args(tmp)
+                args.command, args.operation = "resume", "upload"
+                state = client.state_template("task-fixture", "speechcore")
+                state.update(provider_job_id="job-fixture", status="timed_out", quota_observed={"key": recorded})
+                client.save_state(args.state, state)
+                before = Path(args.state).read_bytes()
+                with patch.object(client, "request", side_effect=[{"status": "completed"}, (self.transcript(), "application/json")]) as req:
+                    if not blocked:
+                        return client.execute(args), req
+                    with self.assertRaises(client.Blocked) as raised:
+                        client.execute(args)
+                # The state stays resumable once the key is configured again.
+                self.assertEqual(Path(args.state).read_bytes(), before)
+                return raised.exception, req
+        both = ("NEURALDEEP_SPEECHCORE_API_KEY", ["key-one", "key-two"])
+        result, req = resume(both, {"variable": "NEURALDEEP_SPEECHCORE_API_KEY", "index": 2})
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual({c.args[2] for c in req.call_args_list}, {"key-two"})
+        for keys, recorded, reason in (
+                (both, {"variable": "NEURALDEEP_SPEECHCORE_API_KEY", "index": 3}, "key 3"),
+                (("NEURALDEEP_API_KEY", ["key-one"]), {"variable": "NEURALDEEP_SPEECHCORE_API_KEY", "index": 1},
+                 "NEURALDEEP_SPEECHCORE_API_KEY")):
+            with self.subTest(recorded=recorded):
+                error, req = resume(keys, recorded, blocked=True)
+                self.assertIn(reason, str(error))
+                req.assert_not_called()
+        # A job attached with --job-id, or a state without a key record, uses the first key.
+        result, req = resume(both, None)
+        self.assertEqual({c.args[2] for c in req.call_args_list}, {"key-one"})
 
     def test_merge_cli_is_offline_and_writes_a_hashed_artifact(self):
         with tempfile.TemporaryDirectory() as tmp:

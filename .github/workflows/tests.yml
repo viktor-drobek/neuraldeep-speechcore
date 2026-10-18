@@ -19,6 +19,7 @@ jobs:
     env:
       # Offline only: tests use mocked HTTP and must never see a real credential.
       NEURALDEEP_API_KEY: ""
+      NEURALDEEP_SPEECHCORE_API_KEY: ""
       CODDY_HOME: /nonexistent-coddy-home
     steps:
       - uses: actions/checkout@v4

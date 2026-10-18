@@ -66,10 +66,12 @@ CI (`.github/workflows/tests.yml`) runs the suite and `--help` on Python 3.10 an
 
 ## Credentials
 
-The helper reads `api_key` from
-`${CODDY_HOME:-~/.coddy}/providers/neuraldeep/neuraldeep-auth.json`, then falls
-back to `NEURALDEEP_API_KEY`. Never print, log or commit either. Coddy users sign
-in with `coddy providers login neuraldeep`.
+The helper reads this skill's own `NEURALDEEP_SPEECHCORE_API_KEY`, then the shared
+`NEURALDEEP_API_KEY`, each from the environment, then from
+`${CODDY_HOME:-~/.coddy}/.env` (several keys separated by commas; the first that
+passes the free checks is used). It does not read the Coddy provider file. Never
+print, log or commit a key; ask the user to add a missing one to `~/.coddy/.env`,
+never in the chat.
 
 ## Delivery workflow
 

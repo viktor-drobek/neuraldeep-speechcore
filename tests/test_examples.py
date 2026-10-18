@@ -62,7 +62,7 @@ class ExampleTests(unittest.TestCase):
         self.assertEqual(len(section), 2, "missing blocked section")
         head, rules = section[0], section[1].split("\n## ", 1)[0]
         self.assertLess(len(head.split("\n# ", 1)[1]), 1500, "blocked section must come early")
-        for needle in ("final answer", "neuraldeep-auth.json", "NEURALDEEP_API_KEY",
+        for needle in ("final answer", "${CODDY_HOME:-~/.coddy}/.env", "NEURALDEEP_SPEECHCORE_API_KEY", "NEURALDEEP_API_KEY",
                        "POST /upload", "by hand", "the user gave you", "supervisor", "undocumented"):
             self.assertIn(needle, rules)
         self.assertIn("never bypass", skill.split("---", 2)[1])

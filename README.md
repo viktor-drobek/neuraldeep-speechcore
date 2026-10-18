@@ -21,11 +21,15 @@ npx skillsbd add https://github.com/viktor-drobek/neuraldeep-speechcore --skill 
 
 ## Requirements
 
-- A NeuralDeep API key (`sk-...`). The skill reads it from
-  `${CODDY_HOME:-~/.coddy}/providers/neuraldeep/neuraldeep-auth.json` (field `api_key`),
-  falling back to `NEURALDEEP_API_KEY` when the file/key is missing, null, empty, or malformed.
+- A NeuralDeep API key (`sk-...`) in this skill's own variable `NEURALDEEP_SPEECHCORE_API_KEY` (several
+  keys may be separated by commas), or the shared `NEURALDEEP_API_KEY`, set in the
+  environment or in `${CODDY_HOME:-~/.coddy}/.env`:
+
+  ```bash
+  echo 'NEURALDEEP_SPEECHCORE_API_KEY=sk-...' >> ~/.coddy/.env
+  ```
 - Python 3.10+ (standard library only).
-- Get a key at <https://neuraldeep.ru> (Hub) or via `coddy providers login neuraldeep`.
+- Get a key at <https://neuraldeep.ru> (Hub).
 
 ## Usage
 

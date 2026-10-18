@@ -415,3 +415,19 @@ shrinking file after the POST started. The new shared test failed first.
 `LC_ALL=C PYTHONUTF8=0`, with no `EncodingWarning` under
 `-X warn_default_encoding`, and on Python 3.10.22 (Docker `python:3.10-slim`,
 non-root, no network).
+
+## Per-skill keys from Coddy's environment
+
+Port from neuraldeep-diarization `52f2d5c`. The helper reads this skill's own
+`NEURALDEEP_SPEECHCORE_API_KEY`, then the shared `NEURALDEEP_API_KEY`, each from the environment first,
+then from `${CODDY_HOME}/.env`, parsed with the rules of Coddy's loader, so a
+key added there works without a restart. A value may hold several keys
+separated by commas; the first whose free preflight passes is used, and the
+state records its variable and number, never its value, so `resume` uses the
+same key. The Coddy provider file `neuraldeep-auth.json` is no longer read.
+The docs ask the user to add the key to `~/.coddy/.env`, never in the chat; the
+test commands and CI also blank `NEURALDEEP_SPEECHCORE_API_KEY`. The new shared tests failed first, and
+every helper test now patches `resolve_keys`. **131 tests passed** (1 skipped
+outside a tag build), both normally and with `LC_ALL=C PYTHONUTF8=0`, with no
+`EncodingWarning` under `-X warn_default_encoding`, and on Python 3.10.22
+(Docker `python:3.10-slim`, non-root, no network).

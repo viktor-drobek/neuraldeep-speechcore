@@ -129,7 +129,8 @@ Relay installation or configuration changes:
   a completed provider job.
 - `artifacts`: references with `sha256` and `provenance` (endpoint, retrieval time,
   `trust: untrusted_data`); no transcript or extracted content in the envelope.
-- `quota_observed`: timestamp, endpoint, relevant service buckets, required units;
+- `quota_observed`: timestamp, endpoint, relevant service buckets, required units,
+  and the key used, by variable and number (`key`), never its value;
   this is private runtime metadata, not a future spending guarantee.
 - `timeouts`, `errors`, and `updated_at`: operational diagnostics. Error text is
   sanitized; it does not include authorization headers or provider response bodies.
