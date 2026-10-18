@@ -1561,6 +1561,18 @@ class SafetyTests(unittest.TestCase):
         self.assertEqual(result["status"], "blocked")
         self.assertIsNone(bodies[0][0].file)
 
+    # Eleventh cross-review (2026-10-18).
+    def test_upload_descriptor_is_blocking_after_the_check(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            audio = Path(tmp) / "a.wav"
+            audio.write_bytes(b"w" * 100)
+            body, _ = client.multipart(audio, "file", {})
+            try:
+                # O_NONBLOCK only guards the open; some FUSE or network file systems honour it on reads.
+                self.assertTrue(os.get_blocking(body.file.fileno()))
+            finally:
+                body.close()
+
     def test_merge_cli_is_offline_and_writes_a_hashed_artifact(self):
         with tempfile.TemporaryDirectory() as tmp:
             code, result, output = self.merge_cli(tmp, self.diarization(), self.transcript_json())

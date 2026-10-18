@@ -404,3 +404,14 @@ tests failed first. **126 tests passed** (1 skipped outside a tag build), both
 normally and with `LC_ALL=C PYTHONUTF8=0`, with no `EncodingWarning` under
 `-X warn_default_encoding`, and on Python 3.10.22 (Docker `python:3.10-slim`,
 non-root, no network).
+
+## Blocking upload reads
+
+Port from neuraldeep-diarization `5e03e41`. `multipart()` clears `O_NONBLOCK`
+with `os.set_blocking()` after the regular-file check, because some FUSE or
+network file systems honour the flag on reads, which would look like a
+shrinking file after the POST started. The new shared test failed first.
+**127 tests passed** (1 skipped outside a tag build), both normally and with
+`LC_ALL=C PYTHONUTF8=0`, with no `EncodingWarning` under
+`-X warn_default_encoding`, and on Python 3.10.22 (Docker `python:3.10-slim`,
+non-root, no network).

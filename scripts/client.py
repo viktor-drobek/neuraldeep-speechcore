@@ -321,7 +321,8 @@ def validate_result(service, response):
 def label_segments(diarization, transcript):
     """Label each timed transcript segment with the speaker it overlaps most.
 
-    Both inputs are ordered by time. Ties go to the speaker who spoke first; a
+    Both inputs are ordered by time. Ties go to the speaker who spoke first in
+    the recording; a
     segment that overlaps no speaker keeps `speaker: None`; empty text is skipped.
     Returns the speakers in order of first appearance and the labeled segments.
     """
@@ -563,6 +564,9 @@ def multipart(path, field, fields):
     if not stat.S_ISREG(info.st_mode):  # Linux opens a directory read-only, too
         os.close(fd)
         raise Blocked("Input file is not a regular file")
+    # O_NONBLOCK only guards the open; reads must block, as some FUSE or
+    # network file systems honour the flag on regular files.
+    os.set_blocking(fd, True)
     file = os.fdopen(fd, "rb")
     body = UploadBody(b"".join(parts), file, info.st_size, f"\r\n--{boundary}--\r\n".encode())
     return body, "multipart/form-data; boundary=" + boundary
