@@ -72,11 +72,69 @@ class SafetyTests(unittest.TestCase):
             client.guard("speechcore", "upload", limits(), {"prices": [{"model": "speechcore", "premium": False}]}, {}, 1)
 
     def test_whisper_is_blocked_without_verified_quota(self):
-        price = {"prices": [{"model": "whisper-1", "premium": False}]}
+        price = {"prices": [{"model": "gigaam-v3", "premium": False}]}
         with self.assertRaises(client.Blocked) as raised:
             client.guard("whisper", "transcribe", limits(), price, {}, 1)
-        self.assertIn("whisper-1 remaining-quota endpoint unverified", str(raised.exception))
-        self.assertEqual(client.price_id("whisper", "transcribe"), "whisper-1")
+        self.assertIn("gigaam-v3 remaining-quota endpoint unverified", str(raised.exception))
+        self.assertEqual(client.price_id("whisper", "transcribe"), "gigaam-v3")
+
+    def test_transcription_models_have_their_own_price_id_and_block(self):
+        for model in ("whisper-1", "whisper-podlodka-turbo", "gigaam-v3"):
+            with self.subTest(model=model):
+                self.assertEqual(client.price_id("whisper", "transcribe", model), model)
+                price = {"prices": [{"model": model, "premium": False}]}
+                with self.assertRaises(client.Blocked) as raised:
+                    client.guard("whisper", "transcribe", limits(), price, {}, 1, model=model)
+                self.assertIn(f"{model} remaining-quota endpoint unverified", str(raised.exception))
+        self.assertEqual(client.price_id("whisper", "transcribe"), "gigaam-v3")
+
+    def test_default_transcription_model_is_gigaam(self):
+        import io
+        import sys
+        self.assertEqual(client.DEFAULT_TRANSCRIPTION_MODEL, "gigaam-v3")
+        price = {"prices": [{"model": "gigaam-v3", "premium": False}]}
+        with patch.object(client, "SERVICE", "whisper"), patch.object(client, "resolve_key", return_value="fixture"), \
+                patch.object(client, "request", side_effect=[limits(), price]), \
+                patch.object(sys, "argv", ["client.py", "check"]), patch("sys.stdout", new_callable=io.StringIO) as out:
+            self.assertEqual(client.main(), 1)
+        self.assertIn("gigaam-v3 remaining-quota endpoint unverified", json.loads(out.getvalue())["errors"][0])
+
+    def test_transcription_model_needs_its_own_price_row(self):
+        price = {"prices": [{"model": "whisper-1", "premium": False}]}
+        for model, reason in (("gigaam-v3", "non-premium"), ("whisper-2", "Unsupported transcription model")):
+            with self.subTest(model=model), self.assertRaises(client.Blocked) as raised:
+                client.guard("whisper", "transcribe", limits(), price, {}, 1, model=model)
+            self.assertIn(reason, str(raised.exception))
+            self.assertNotIn("unverified", str(raised.exception))
+
+    def test_cli_model_flag_selects_the_transcription_model(self):
+        import io
+        import sys
+        price = {"prices": [{"model": "gigaam-v3", "premium": False}]}
+        with patch.object(client, "SERVICE", "whisper"), patch.object(client, "resolve_key", return_value="fixture"), \
+                patch.object(client, "request", side_effect=[limits(), price]) as req, \
+                patch.object(sys, "argv", ["client.py", "check", "--model", "gigaam-v3"]), patch("sys.stdout", new_callable=io.StringIO) as out:
+            self.assertEqual(client.main(), 1)
+        self.assertIn("gigaam-v3 remaining-quota endpoint unverified", json.loads(out.getvalue())["errors"][0])
+        self.assertEqual([c.args[:2] for c in req.call_args_list], [("GET", client.HUB + "/limits"), ("GET", client.PRICES)])
+        with tempfile.TemporaryDirectory() as tmp, patch.object(client, "SERVICE", "whisper"), patch.object(client, "resolve_key", return_value="fixture"), \
+                patch.object(client, "request") as req, patch("sys.stdout", new_callable=io.StringIO) as out, \
+                patch.object(sys, "argv", ["client.py", "run", "--model", "whisper-podlodka-turbo", "--file", str(Path(tmp) / "a.wav"),
+                                           "--state", str(Path(tmp) / "s.json"), "--output", str(Path(tmp) / "t.json")]):
+            self.assertEqual(client.main(), 1)
+        self.assertIn("whisper-podlodka-turbo transcription disabled", json.loads(out.getvalue())["errors"][0])
+        req.assert_not_called()
+
+    def test_model_flag_is_refused_outside_transcription_and_for_unknown_models(self):
+        import io
+        import sys
+        for service, argv in (("search", ["check", "web", "--model", "gigaam-v3"]), ("whisper", ["check", "--model", "whisper-2"])):
+            with self.subTest(service=service), patch.object(client, "SERVICE", service), patch.object(client, "request") as req, \
+                    patch.object(sys, "argv", ["client.py", *argv]), patch("sys.stdout", new_callable=io.StringIO), patch("sys.stderr", new_callable=io.StringIO):
+                with self.assertRaises(SystemExit) as raised:
+                    client.main()
+            self.assertEqual(raised.exception.code, 2)
+            req.assert_not_called()
 
     def test_poll_failure_and_deadline_never_fetch(self):
         for status in ("failed", "cancelled", "error"):
@@ -696,7 +754,7 @@ class SafetyTests(unittest.TestCase):
                 self.assertEqual(client.main(), 1)
             result = json.loads(out.getvalue())
             self.assertEqual(result["status"], "blocked")
-            self.assertIn("whisper-1 transcription disabled until remaining quota is verified", result["errors"][0])
+            self.assertIn("gigaam-v3 transcription disabled until remaining quota is verified", result["errors"][0])
             self.assertFalse(output.exists())
             req.assert_not_called()
             body.assert_not_called()
