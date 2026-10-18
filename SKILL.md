@@ -10,6 +10,7 @@ description: >
   meeting analysis, or podcast processing.
   A `blocked` upload is the final answer: report it and stop, never bypass it.
 metadata:
+  version: 1.0.0
   neuraldeep:
     emoji: "🎙️"
     base_url: "https://speechcore.neuraldeep.ru/api"
