@@ -290,11 +290,12 @@ def validate_result(service, response):
     return data
 
 
-def merge_transcript(diarization, transcript):
+def label_segments(diarization, transcript):
     """Label each timed transcript segment with the speaker it overlaps most.
 
-    Ties go to the speaker who appeared first; a segment that overlaps no
-    speaker keeps `speaker: null`. Consecutive segments of one speaker form a turn.
+    Both inputs are ordered by time. Ties go to the speaker who spoke first; a
+    segment that overlaps no speaker keeps `speaker: None`; empty text is skipped.
+    Returns the speakers in order of first appearance and the labeled segments.
     """
     try:
         validate_diarization(diarization)
@@ -308,7 +309,7 @@ def merge_transcript(diarization, transcript):
         raise Blocked("Transcript is not a JSON object with timed text segments") from None
     timed = sorted(diarization["segments"], key=lambda s: (s["start"], s["end"]))
     speakers = list(dict.fromkeys(s["speaker"] for s in timed))
-    turns, unassigned = [], 0
+    labeled = []
     for segment in sorted(transcript["segments"], key=lambda s: (s["start"], s["end"])):
         text = segment["text"].strip()
         if not text:
@@ -321,12 +322,21 @@ def merge_transcript(diarization, transcript):
         overlap = {k: round(v, 6) for k, v in overlap.items()}
         best = max(speakers, key=lambda s: overlap[s], default=None)
         speaker = best if best is not None and overlap[best] > 0 else None
-        unassigned += speaker is None
-        if turns and turns[-1]["speaker"] == speaker:
-            turns[-1]["end"] = max(turns[-1]["end"], end)
-            turns[-1]["text"] += " " + text
+        labeled.append({"speaker": speaker, "start": start, "end": end, "text": text})
+    return speakers, labeled
+
+
+def merge_transcript(diarization, transcript):
+    """Join consecutive labeled segments of one speaker into turns."""
+    speakers, labeled = label_segments(diarization, transcript)
+    turns = []
+    for item in labeled:
+        if turns and turns[-1]["speaker"] == item["speaker"]:
+            turns[-1]["end"] = max(turns[-1]["end"], item["end"])
+            turns[-1]["text"] += " " + item["text"]
         else:
-            turns.append({"speaker": speaker, "start": start, "end": end, "text": text})
+            turns.append(dict(item))
+    unassigned = sum(item["speaker"] is None for item in labeled)
     return {"speakers": speakers, "turns": turns, "unassigned_segments": unassigned}
 
 
@@ -334,26 +344,26 @@ def clock(ms, separator):
     return f"{ms // 3600000:02d}:{ms // 60000 % 60:02d}:{ms // 1000 % 60:02d}{separator}{ms % 1000:03d}"
 
 
-def cues(merged, separator):
-    """Yield (timing, speaker, text) per turn; a cue lasts at least 1 ms and fits on one line."""
-    for turn in merged["turns"]:
+def cues(items, separator):
+    """Yield (timing, speaker, text) per item; a cue lasts at least 1 ms and fits on one line."""
+    for turn in items:
         start = round(turn["start"] * 1000)
         end = max(round(turn["end"] * 1000), start + 1)
         speaker = " ".join((turn["speaker"] or "").split()) or None
         yield f"{clock(start, separator)} --> {clock(end, separator)}", speaker, " ".join(turn["text"].split())
 
 
-def to_webvtt(merged):
+def to_webvtt(items):
     def escape(text):
         return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
     blocks = [f"{timing}\n" + (f"<v {escape(speaker)}>" if speaker is not None else "") + escape(text)
-              for timing, speaker, text in cues(merged, ".")]
+              for timing, speaker, text in cues(items, ".")]
     return "WEBVTT\n\n" + "\n\n".join(blocks) + "\n"
 
 
-def to_srt(merged):
+def to_srt(items):
     blocks = [f"{n}\n{timing}\n" + (f"{speaker}: " if speaker is not None else "") + text
-              for n, (timing, speaker, text) in enumerate(cues(merged, ","), 1)]
+              for n, (timing, speaker, text) in enumerate(cues(items, ","), 1)]
     return "\n\n".join(blocks) + "\n"
 
 
@@ -375,19 +385,29 @@ def merge_files(args):
         raise Blocked("Output must differ from the inputs")
     raw = [p.read_bytes() for p in sources]
     hashes = {name: hashlib.sha256(data).hexdigest() for name, data in zip(names, raw)}
-    values = [json.loads(data.decode("utf-8")) for data in raw]
+    values = []
+    for name, data in zip(names, raw):
+        try:
+            # Bytes let json accept a UTF-8 byte order mark.
+            values.append(json.loads(data))
+        except (ValueError, RecursionError):
+            raise Blocked(f"{name.capitalize()} file is not valid UTF-8 JSON") from None
     if fmt == "rttm":
         try:
             validate_diarization(values[0])
         except (ValueError, TypeError):
             raise Blocked("Diarization input does not match the /v1/audio/diarize JSON shape") from None
         text = to_rttm(values[0], sources[0].stem)
+    elif fmt in ("vtt", "srt"):
+        # Subtitles keep each transcript segment's own timing.
+        _, labeled = label_segments(*values)
+        try:
+            text = to_webvtt(labeled) if fmt == "vtt" else to_srt(labeled)
+        except OverflowError:
+            raise Blocked("Timestamps are too large to write as subtitles") from None
     else:
         merged = merge_transcript(*values)
-        if fmt == "json":
-            text = json.dumps(dict(merged, sources=hashes), ensure_ascii=False, indent=2)
-        else:
-            text = to_webvtt(merged) if fmt == "vtt" else to_srt(merged)
+        text = json.dumps(dict(merged, sources=hashes), ensure_ascii=False, indent=2)
     artifact = save_artifact(args.output, text.encode("utf-8"), "local:merge")
     artifact["provenance"]["sources"] = hashes
     return {"status": "completed", "artifacts": [artifact]}
@@ -487,10 +507,14 @@ def execute(args):
         raise Blocked("State and artifact paths must differ")
     if args.command == "run":
         # A paid answer must have somewhere to go and must not replace its own input.
-        output = Path(args.output).resolve()
-        if args.file and output == Path(args.file).resolve():
+        output = Path(args.output)
+        if args.file and output.resolve() == Path(args.file).resolve():
             raise Blocked("Artifact path must differ from the input file")
-        if not output.parent.is_dir() or not os.access(output.parent, os.W_OK):
+        if output.is_dir():
+            raise Blocked("Artifact path is a directory")
+        # atomic_write() replaces the path as given, in its own (unresolved) parent.
+        parent = output.absolute().parent
+        if not parent.is_dir() or not os.access(parent, os.W_OK):
             raise Blocked("Artifact directory is missing or not writable")
     if args.command == "resume":
         if SERVICE in SYNCHRONOUS:

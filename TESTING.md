@@ -293,3 +293,17 @@ cap tests, which only add coverage.
 **101 tests passed** (1 skipped outside a tag build), both normally and with
 `LC_ALL=C PYTHONUTF8=0`, with no `EncodingWarning` under
 `-X warn_default_encoding`.
+
+## Second cross-review fixes
+
+Port from neuraldeep-diarization `e376732`. `run` now also blocks an
+`--output` that is a directory, and checks the unresolved parent that
+`atomic_write()` uses, so a symlink in a read-only directory blocks too.
+WebVTT and SRT get one cue per transcript segment, through `label_segments()`.
+Huge timestamps and deeply nested input JSON end `blocked`. `merge` parses
+input bytes, accepting a UTF-8 byte order mark, and names a file that is not
+valid JSON. The new and changed shared tests failed first, apart from the
+read-only and missing directory cases, which already passed.
+**106 tests passed** (1 skipped outside a tag build), both normally and with
+`LC_ALL=C PYTHONUTF8=0`, with no `EncodingWarning` under
+`-X warn_default_encoding`.

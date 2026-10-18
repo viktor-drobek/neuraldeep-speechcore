@@ -1003,23 +1003,41 @@ class SafetyTests(unittest.TestCase):
         return code, json.loads(out.getvalue()), Path(output)
 
     def turns(self, *turns):
-        return {"speakers": [], "unassigned_segments": 0,
-                "turns": [dict(zip(("speaker", "start", "end", "text"), t)) for t in turns]}
+        return [dict(zip(("speaker", "start", "end", "text"), t)) for t in turns]
+
+    def test_label_segments_keeps_each_transcript_segment(self):
+        _, labeled = client.label_segments(self.diarization(), self.transcript_json())
+        self.assertEqual([(c["speaker"], c["start"], c["end"], c["text"]) for c in labeled],
+                         [("SPEAKER_0", 0.0, 2.0, "Hello there."), ("SPEAKER_0", 2.5, 5.0, "Hi."),
+                          ("SPEAKER_1", 17.0, 19.0, "How are you?"), ("SPEAKER_1", 19.0, 21.0, "Fine."),
+                          (None, 30.0, 31.0, "Bye.")])
 
     def test_webvtt_marks_speakers_with_voice_tags(self):
-        merged = client.merge_transcript(self.diarization(), self.transcript_json())
-        self.assertEqual(client.to_webvtt(merged),
+        _, labeled = client.label_segments(self.diarization(), self.transcript_json())
+        self.assertEqual(client.to_webvtt(labeled),
                          "WEBVTT\n\n"
-                         "00:00:00.000 --> 00:00:05.000\n<v SPEAKER_0>Hello there. Hi.\n\n"
-                         "00:00:17.000 --> 00:00:21.000\n<v SPEAKER_1>How are you? Fine.\n\n"
+                         "00:00:00.000 --> 00:00:02.000\n<v SPEAKER_0>Hello there.\n\n"
+                         "00:00:02.500 --> 00:00:05.000\n<v SPEAKER_0>Hi.\n\n"
+                         "00:00:17.000 --> 00:00:19.000\n<v SPEAKER_1>How are you?\n\n"
+                         "00:00:19.000 --> 00:00:21.000\n<v SPEAKER_1>Fine.\n\n"
                          "00:00:30.000 --> 00:00:31.000\nBye.\n")
 
     def test_srt_prefixes_the_speaker_and_numbers_cues(self):
-        merged = client.merge_transcript(self.diarization(), self.transcript_json())
-        self.assertEqual(client.to_srt(merged),
-                         "1\n00:00:00,000 --> 00:00:05,000\nSPEAKER_0: Hello there. Hi.\n\n"
-                         "2\n00:00:17,000 --> 00:00:21,000\nSPEAKER_1: How are you? Fine.\n\n"
-                         "3\n00:00:30,000 --> 00:00:31,000\nBye.\n")
+        _, labeled = client.label_segments(self.diarization(), self.transcript_json())
+        self.assertEqual(client.to_srt(labeled),
+                         "1\n00:00:00,000 --> 00:00:02,000\nSPEAKER_0: Hello there.\n\n"
+                         "2\n00:00:02,500 --> 00:00:05,000\nSPEAKER_0: Hi.\n\n"
+                         "3\n00:00:17,000 --> 00:00:19,000\nSPEAKER_1: How are you?\n\n"
+                         "4\n00:00:19,000 --> 00:00:21,000\nSPEAKER_1: Fine.\n\n"
+                         "5\n00:00:30,000 --> 00:00:31,000\nBye.\n")
+
+    def test_subtitle_cues_keep_segment_timing_across_pauses(self):
+        diarization = dict(self.diarization(), segments=[{"speaker": "A", "start": 0.0, "end": 12.0}])
+        transcript = {"segments": [{"start": 0.0, "end": 2.0, "text": "first"}, {"start": 10.0, "end": 12.0, "text": "second"}]}
+        with tempfile.TemporaryDirectory() as tmp:
+            _, _, out = self.merge_cli(tmp, diarization, transcript, str(Path(tmp) / "out.vtt"), ["--format", "vtt"])
+            self.assertEqual(out.read_text(encoding="utf-8"),
+                             "WEBVTT\n\n00:00:00.000 --> 00:00:02.000\n<v A>first\n\n00:00:10.000 --> 00:00:12.000\n<v A>second\n")
 
     def test_subtitles_escape_markup_flatten_lines_and_keep_cues_valid(self):
         merged = self.turns(("A>B", 2.0, 2.0, "a < b & c --> d\n\nnext"), (None, 3723.4567, 3724, "late"))
@@ -1092,15 +1110,30 @@ class SafetyTests(unittest.TestCase):
         self.assertEqual(client.diarize_timeout(1), 120)
 
     def test_run_checks_the_output_path_before_any_request(self):
-        for case in ("output is the input", "missing directory"):
+        cases = ["output is the input", "missing directory", "existing directory", "current directory"]
+        if os.geteuid() != 0:  # root ignores directory permissions
+            cases += ["read-only directory", "link in a read-only directory"]
+        for case in cases:
             for service in ("diarize", "ocr"):
                 with self.subTest(case=case, service=service), tempfile.TemporaryDirectory() as tmp, \
                         patch.object(client, "SERVICE", service), patch.object(client, "resolve_key", return_value="fixture"):
                     args = self.diarize_args(tmp)
                     args.operation = client.OPERATIONS[service][0]
-                    args.output = args.file if case == "output is the input" else str(Path(tmp) / "missing" / "out.json")
-                    with patch.object(client, "request") as req, self.assertRaises(client.Blocked):
-                        client.execute(args)
+                    locked = Path(tmp) / "locked"
+                    locked.mkdir()
+                    args.output = {"output is the input": args.file,
+                                   "missing directory": str(Path(tmp) / "missing" / "out.json"),
+                                   "existing directory": tmp, "current directory": ".",
+                                   "read-only directory": str(locked / "out.json"),
+                                   "link in a read-only directory": str(locked / "link.json")}[case]
+                    if case == "link in a read-only directory":
+                        (locked / "link.json").symlink_to(Path(tmp) / "target.json")
+                    locked.chmod(0o500)
+                    try:
+                        with patch.object(client, "request") as req, self.assertRaises(client.Blocked):
+                            client.execute(args)
+                    finally:
+                        locked.chmod(0o700)
                     req.assert_not_called()
                     self.assertEqual(Path(args.file).read_bytes(), b"ID3 audio fixture")
                     self.assertFalse(Path(args.state).exists())
@@ -1113,6 +1146,32 @@ class SafetyTests(unittest.TestCase):
         self.assertEqual(client.to_srt(merged),
                          "1\n00:00:00,000 --> 00:00:01,000\nA 00:00:09.000 --> 00:00:10.000: one\n\n"
                          "2\n00:00:02,000 --> 00:00:03,000\ntwo\n")
+
+    def test_merge_reports_bad_input_files_clearly(self):
+        cases = {"malformed": b'{"segments": [', "nested": b"[" * 100000, "not utf-8": b'{"segments": "\xff"}'}
+        for case, data in cases.items():
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as tmp:
+                code, result, output = self.merge_cli(tmp, self.diarization(), self.transcript_json())
+                Path(tmp, "transcript.json").write_bytes(data)
+                code, result, output = self.merge_cli(tmp, self.diarization(), None, extra=["--transcript", str(Path(tmp, "transcript.json"))])
+                self.assertEqual((code, result["status"]), (1, "blocked"))
+                self.assertEqual(result["errors"], ["Transcript file is not valid UTF-8 JSON"])
+
+    def test_merge_accepts_a_utf8_byte_order_mark(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            Path(tmp, "transcript.json").write_bytes(b"\xef\xbb\xbf" + json.dumps(self.transcript_json()).encode("utf-8"))
+            code, result, _ = self.merge_cli(tmp, self.diarization(), None, extra=["--transcript", str(Path(tmp, "transcript.json"))])
+        self.assertEqual((code, result["status"]), (0, "completed"))
+
+    def test_subtitles_block_timestamps_too_large_to_write(self):
+        diarization = dict(self.diarization(), segments=[{"speaker": "A", "start": 0.0, "end": 1e308}])
+        transcript = {"segments": [{"start": 0.0, "end": 1e308, "text": "x"}]}
+        for fmt, expected in (("vtt", "blocked"), ("srt", "blocked"), ("json", "completed")):
+            with self.subTest(fmt=fmt), tempfile.TemporaryDirectory() as tmp:
+                code, result, _ = self.merge_cli(tmp, diarization, transcript, str(Path(tmp) / f"out.{fmt}"), ["--format", fmt])
+                self.assertEqual(result["status"], expected)
+                if expected == "blocked":
+                    self.assertIn("too large", result["errors"][0])
 
     def test_minimum_cue_length_is_applied_after_rounding(self):
         merged = self.turns(("S", 0.0015, 0.0015, "x"))
