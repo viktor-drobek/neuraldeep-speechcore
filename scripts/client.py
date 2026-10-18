@@ -19,15 +19,19 @@ SERVICE = "speechcore"
 HUB = "https://api.neuraldeep.ru/v1"
 SPEECH = "https://speechcore.neuraldeep.ru/api"
 PRICES = "https://neuraldeep.ru/api/public/wallet-prices"
-QUOTAS = {"search": "/search/quota", "ocr": "/ocr/balance", "images": "/images/quota"}
+QUOTAS = {"search": "/search/quota", "ocr": "/ocr/balance", "images": "/images/quota",
+          "diarize": "/audio/diarize/quota"}
 OPERATIONS = {"search": ("web", "tg", "crawl"), "ocr": ("extract",),
               "images": ("generate", "upscale", "background/remove", "enhance", "avatar"),
-              "speechcore": ("upload",), "whisper": ("transcribe",)}
+              "speechcore": ("upload",), "whisper": ("transcribe",), "diarize": ("diarize",)}
 # Speech-to-text models on /v1/audio/transcriptions; each is its own public price ID.
 TRANSCRIPTION_MODELS = ("gigaam-v3", "whisper-1", "whisper-podlodka-turbo")
 DEFAULT_TRANSCRIPTION_MODEL = "gigaam-v3"
 # Services that answer the submission directly, without a provider job to resume.
-SYNCHRONOUS = {"search", "whisper"}
+SYNCHRONOUS = {"search", "whisper", "diarize"}
+# Provider limits for /v1/audio/diarize: up to 4 hours and 500 MB per file.
+MAX_DIARIZE_MINUTES = 240
+MAX_DIARIZE_BYTES = 500 * 1000 * 1000
 # Field holding the provider job ID in each async submission response.
 JOB_ID_FIELDS = {"images": "task_uid", "ocr": "id", "speechcore": "task_id"}
 # Documented in SKILL.md; tests keep the two in sync.
@@ -102,6 +106,8 @@ def price_id(service, operation, model=None):
         return model or DEFAULT_TRANSCRIPTION_MODEL
     if service == "speechcore":
         return "speechcore"
+    if service == "diarize":
+        return "audio:diarize"
     return prefix + ":" + operation.replace("/", "_")
 
 
@@ -121,6 +127,8 @@ def guard(service, operation, limits, prices, quota, units, model=None):
             raise Blocked("Operation is not explicitly non-premium in public prices")
         if type(units) is not int or units <= 0:
             raise Blocked("Positive integer quota cost required")
+        if service == "diarize" and units > MAX_DIARIZE_MINUTES:
+            raise Blocked("Audio longer than 4 hours is not accepted")
         if service == "speechcore":
             raise Blocked("SpeechCore remaining-quota endpoint unverified; uploads disabled")
         if service == "whisper":
@@ -134,6 +142,14 @@ def guard(service, operation, limits, prices, quota, units, model=None):
             remaining = [bucket[w]["remaining"] for w in ("day", "month")]
         elif service == "images":
             remaining = [quota["img"][w]["remaining"] for w in ("day", "month")]
+        elif service == "diarize":
+            # This bucket reports used and limit minutes, not a remaining count.
+            if quota["unit"] != "minute":
+                raise Blocked("Diarization quota is not counted in minutes")
+            windows = [quota[w] for w in ("day", "month")]
+            if any(type(b[f]) is not int or b[f] < 0 for b in windows for f in ("used", "limit")):
+                raise Blocked("Insufficient or invalid service quota")
+            remaining = [b["limit"] - b["used"] for b in windows]
         else:
             remaining = [quota[w]["remaining"] for w in ("daily_pages", "monthly_pages")]
         if any(type(n) is not int or n < units for n in remaining):
@@ -148,7 +164,8 @@ def preflight(service, operation, key, units, model=None):
     quota = request("GET", HUB + QUOTAS[service], key) if service in QUOTAS else {}
     guard(service, operation, limits, prices, quota, units, model=model)
     # Persist only relevant quota fields, never the account-wide limits response.
-    fields = {"search": ("search", "crawl"), "ocr": ("daily_pages", "monthly_pages"), "images": ("img",)}
+    fields = {"search": ("search", "crawl"), "ocr": ("daily_pages", "monthly_pages"), "images": ("img",),
+              "diarize": ("unit", "day", "month")}
     return {"observed_at": now(), "endpoint": HUB + QUOTAS[service],
             "units_required": units, "buckets": {k: quota[k] for k in fields[service]}}
 
@@ -203,6 +220,35 @@ def save_artifact(path, data, endpoint):
             "provenance": {"endpoint": endpoint, "retrieved_at": now(), "trust": "untrusted_data"}}
 
 
+def finite(value):
+    return type(value) in (int, float) and math.isfinite(value)
+
+
+def check_segments(segments, label):
+    """Raise ValueError unless every segment has a string `label` and 0 <= start <= end."""
+    if not isinstance(segments, list):
+        raise ValueError()
+    for segment in segments:
+        if not isinstance(segment, dict) or not isinstance(segment.get(label), str):
+            raise ValueError()
+        start, end = segment.get("start"), segment.get("end")
+        if not finite(start) or not finite(end) or not 0 <= start <= end:
+            raise ValueError()
+
+
+def validate_diarization(value):
+    """Raise ValueError unless value has the documented /v1/audio/diarize JSON shape."""
+    if not isinstance(value, dict) or value.get("success") is False or value.get("error"):
+        raise ValueError()
+    if not finite(value.get("duration")) or value["duration"] < 0:
+        raise ValueError()
+    for field in ("num_speakers", "minutes_charged"):
+        if type(value.get(field)) is not int or value[field] < 0:
+            raise ValueError()
+    check_segments(value.get("segments"), "speaker")
+    return value
+
+
 def validate_result(service, response):
     if not isinstance(response, tuple) or len(response) != 2:
         raise RequestError("Missing typed result response; resume the same provider job")
@@ -223,22 +269,62 @@ def validate_result(service, response):
             if not isinstance(value.get("content"), str):
                 raise ValueError()
         elif service == "speechcore":
-            duration = value.get("duration")
-            if type(duration) not in (int, float) or not math.isfinite(duration) or duration < 0:
+            if not finite(value.get("duration")) or value["duration"] < 0:
                 raise ValueError()
-            if not isinstance(value.get("segments"), list):
-                raise ValueError()
-            for segment in value["segments"]:
-                if not isinstance(segment, dict) or not isinstance(segment.get("text"), str):
-                    raise ValueError()
-                start, end = segment.get("start"), segment.get("end")
-                if any(type(n) not in (int, float) or not math.isfinite(n) for n in (start, end)) or not 0 <= start <= end:
-                    raise ValueError()
+            check_segments(value.get("segments"), "text")
         else:
             raise ValueError()
     except (ValueError, TypeError):
         raise RequestError("Invalid result schema; resume the same provider job") from None
     return data
+
+
+def merge_transcript(diarization, transcript):
+    """Label each timed transcript segment with the speaker it overlaps most.
+
+    Ties go to the speaker who appeared first; a segment that overlaps no
+    speaker keeps `speaker: null`. Consecutive segments of one speaker form a turn.
+    """
+    try:
+        validate_diarization(diarization)
+    except (ValueError, TypeError):
+        raise Blocked("Diarization input does not match the /v1/audio/diarize JSON shape") from None
+    try:
+        if not isinstance(transcript, dict):
+            raise ValueError()
+        check_segments(transcript.get("segments"), "text")
+    except (ValueError, TypeError):
+        raise Blocked("Transcript is not a JSON object with timed text segments") from None
+    speakers = list(dict.fromkeys(s["speaker"] for s in diarization["segments"]))
+    turns, unassigned = [], 0
+    for segment in transcript["segments"]:
+        text = segment["text"].strip()
+        if not text:
+            continue
+        start, end = segment["start"], segment["end"]
+        overlap = dict.fromkeys(speakers, 0.0)
+        for turn in diarization["segments"]:
+            overlap[turn["speaker"]] += max(0.0, min(end, turn["end"]) - max(start, turn["start"]))
+        best = max(speakers, key=lambda s: overlap[s], default=None)
+        speaker = best if best is not None and overlap[best] > 0 else None
+        unassigned += speaker is None
+        if turns and turns[-1]["speaker"] == speaker:
+            turns[-1]["end"] = max(turns[-1]["end"], end)
+            turns[-1]["text"] += " " + text
+        else:
+            turns.append({"speaker": speaker, "start": start, "end": end, "text": text})
+    return {"speakers": speakers, "turns": turns, "unassigned_segments": unassigned}
+
+
+def merge_files(args):
+    sources = [Path(args.diarization), Path(args.transcript)]
+    if Path(args.output).resolve() in {p.resolve() for p in sources}:
+        raise Blocked("Output must differ from the inputs")
+    raw = [p.read_bytes() for p in sources]
+    merged = merge_transcript(*(json.loads(data.decode("utf-8")) for data in raw))
+    merged["sources"] = {name: hashlib.sha256(data).hexdigest() for name, data in zip(("diarization", "transcript"), raw)}
+    data = json.dumps(merged, ensure_ascii=False, indent=2).encode("utf-8")
+    return {"status": "completed", "artifacts": [save_artifact(args.output, data, "local:merge")]}
 
 
 def poll(get, status_url, result_url, success, *, timeout=DEFAULT_TIMEOUT, interval=POLL_INTERVAL):
@@ -302,7 +388,7 @@ def submission(args):
     payload = json.loads(Path(args.payload).read_text(encoding="utf-8")) if args.payload else {}
     if not isinstance(payload, dict):
         raise Blocked("Payload must be a JSON object")
-    url = HUB + "/" + SERVICE + "/" + args.operation
+    url = HUB + "/audio/diarize" if SERVICE == "diarize" else HUB + "/" + SERVICE + "/" + args.operation
     if SERVICE == "search":
         if args.operation == "tg":
             return "GET", url + "?" + urlencode(payload), None, "application/json"
@@ -311,16 +397,24 @@ def submission(args):
         return "POST", url, json.dumps(payload).encode(), "application/json"
     if not args.file:
         raise Blocked("A local --file is required")
+    if SERVICE == "diarize" and Path(args.file).stat().st_size > MAX_DIARIZE_BYTES:
+        raise Blocked("Audio file is larger than 500 MB")
     fields = {"model_profile": args.profile} if SERVICE == "ocr" else {}
     if payload:
         raise Blocked("Extra multipart fields are not supported by this minimal helper")
-    body, content_type = multipart(args.file, "file" if SERVICE == "ocr" else "image", fields)
+    body, content_type = multipart(args.file, "file" if SERVICE in ("ocr", "diarize") else "image", fields)
     return "POST", url, body, content_type
 
 
 def execute(args):
+    if args.command == "merge":
+        return merge_files(args)
     key = resolve_key()
-    units = args.pages * (2 if args.profile == "pro" else 1) if SERVICE == "ocr" else 1
+    units = 1
+    if SERVICE == "ocr":
+        units = args.pages * (2 if args.profile == "pro" else 1)
+    elif SERVICE == "diarize":
+        units = getattr(args, "minutes", 0)
     if args.command == "check":
         return {"status": "ready", "quota_observed": preflight(SERVICE, args.operation, key, units, model=getattr(args, "model", None))}
     if Path(args.state).resolve() == Path(args.output).resolve():
@@ -361,6 +455,13 @@ def execute(args):
                     raise JobError("Unrecognized search response")
                 data = json.dumps(response, ensure_ascii=False, indent=2).encode()
                 result_url = url.split("?")[0]
+            elif SERVICE == "diarize":
+                try:
+                    validate_diarization(response)
+                except (ValueError, TypeError):
+                    raise JobError("Unrecognized diarization response") from None
+                data = json.dumps(response, ensure_ascii=False, indent=2).encode()
+                result_url = url
             else:
                 state["provider_job_id"] = response.get(JOB_ID_FIELDS[SERVICE])
                 job_urls(SERVICE, state["provider_job_id"])
@@ -390,13 +491,16 @@ def execute(args):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=("check", "run", "resume"))
+    parser.add_argument("command", choices=("check", "run", "resume", "merge"))
     parser.add_argument("operation", nargs="?", choices=OPERATIONS[SERVICE], default=OPERATIONS[SERVICE][0])
     parser.add_argument("--payload", help="JSON request file (search or image generation)")
-    parser.add_argument("--file", help="Input file for OCR/image processing")
+    parser.add_argument("--file", help="Input file for OCR, image processing or diarization")
     parser.add_argument("--pages", type=int, default=0, help="Verified OCR input page count; required before upload")
     parser.add_argument("--profile", choices=("fast", "pro"), default="fast")
     parser.add_argument("--model", choices=TRANSCRIPTION_MODELS, help="Transcription model (default gigaam-v3)")
+    parser.add_argument("--minutes", type=int, default=0, help="Verified audio duration in whole minutes, rounded up; required before diarization")
+    parser.add_argument("--diarization", help="merge: diarization JSON from /v1/audio/diarize")
+    parser.add_argument("--transcript", help="merge: transcript JSON with timed text segments")
     parser.add_argument("--state", default="job-state.json", help="Private durable state; must not exist for a new submission")
     parser.add_argument("--output", default="result.bin")
     parser.add_argument("--task-id", default="standalone")
@@ -407,6 +511,12 @@ def main():
         parser.error("--timeout must be finite and positive")
     if args.model and SERVICE != "whisper":
         parser.error("--model applies only to transcription")
+    if (args.minutes or args.command == "merge") and SERVICE != "diarize":
+        parser.error("--minutes and merge apply only to diarization")
+    if args.command == "merge" and not (args.diarization and args.transcript):
+        parser.error("merge needs --diarization and --transcript")
+    if args.command != "merge" and (args.diarization or args.transcript):
+        parser.error("--diarization and --transcript apply only to merge")
     try:
         result = execute(args)
     except (Blocked, RequestError, JobError) as error:

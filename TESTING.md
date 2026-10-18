@@ -255,3 +255,19 @@ reads (`coddy skills list` showed `1.0.0` for a copy under a scratch
 **70 tests passed** (1 skipped outside a tag build), both normally and with
 `LC_ALL=C PYTHONUTF8=0`, with no `EncodingWarning` under
 `-X warn_default_encoding`.
+
+## Diarization service
+
+Port from neuraldeep-diarization: the shared helper now knows the `diarize`
+service (`POST /v1/audio/diarize`, price ID `audio:diarize`). Its quota at
+`/v1/audio/diarize/quota` reports `used` and `limit` minutes per `day` and
+`month`, verified read-only on 2026-10-18, and the guard requires `limit - used`
+to cover `--minutes`, at most 240, with files of at most 500 MB. An offline
+`merge` command joins a diarization with a timed transcript. `--minutes` and
+`merge` are refused for the other services (exit 2), and this service's
+behaviour is unchanged. The 16 shared tests and the merge case of the UTF-8 test
+were added first and failed with `KeyError: 'diarize'` and the missing
+`merge_transcript`. `STARTER_RELAY.md` lists the diarization bucket.
+**86 tests passed** (1 skipped outside a tag build), both normally and with
+`LC_ALL=C PYTHONUTF8=0`, with no `EncodingWarning` under
+`-X warn_default_encoding`.

@@ -547,6 +547,16 @@ class SafetyTests(unittest.TestCase):
             with patch.object(client, "SERVICE", "ocr"), patch.object(client, "resolve_key", return_value="fixture"), \\
                     patch.object(client, "request", side_effect=responses):
                 attempt("resume", lambda: client.execute(args)["status"])
+            utf8_json(tmp / "d.json", {"duration": 2.0, "num_speakers": 1, "minutes_charged": 1,
+                                       "segments": [{"speaker": "SPEAKER_0", "start": 0, "end": 2}]})
+            utf8_json(tmp / "t.json", {"segments": [{"start": 0, "end": 2, "text": text}]})
+            args = Namespace(command="merge", diarization=str(tmp / "d.json"), transcript=str(tmp / "t.json"),
+                             output=str(tmp / "merged.json"), task_id="task-fixture")
+            def merge():
+                client.execute(args)
+                return json.loads((tmp / "merged.json").read_bytes().decode("utf-8"))["turns"][0]["text"] == text
+            with patch.object(client, "SERVICE", "diarize"):
+                attempt("merge", merge)
             print(json.dumps(out))
         ''')
         env = {k: v for k, v in os.environ.items() if not k.startswith(("LC_", "PYTHON"))}
@@ -555,7 +565,7 @@ class SafetyTests(unittest.TestCase):
             run = subprocess.run([sys.executable, "-B", "-c", script, str(SPEC.origin), tmp],
                                  env=env, capture_output=True, encoding="utf-8")
         self.assertEqual(run.returncode, 0, run.stderr)
-        self.assertEqual(json.loads(run.stdout), {"key": "file-fixture", "query": True, "resume": "completed"})
+        self.assertEqual(json.loads(run.stdout), {"key": "file-fixture", "query": True, "resume": "completed", "merge": True})
 
     def test_request_refuses_unapproved_origins_before_sending(self):
         for url in ("http://api.neuraldeep.ru/v1/limits", "https://evil.example/v1/limits",
@@ -759,6 +769,262 @@ class SafetyTests(unittest.TestCase):
             req.assert_not_called()
             body.assert_not_called()
 
+
+    # Speaker diarization (/v1/audio/diarize), verified read-only on 2026-10-18:
+    # the quota reports used and limit minutes per window, not a remaining count.
+    def diarize_quota(self, day_used=0, month_used=0, limit=300):
+        # Synthetic limits; live values are never fixtures.
+        return {"unit": "minute", "tier": "starter", "day": {"used": day_used, "limit": limit},
+                "month": {"used": month_used, "limit": limit * 10}}
+
+    def diarization(self):
+        return {"duration": 61.0, "num_speakers": 2, "minutes_charged": 2,
+                "segments": [{"speaker": "SPEAKER_0", "start": 1.1, "end": 5.75},
+                             {"speaker": "SPEAKER_1", "start": 17.28, "end": 21.26}]}
+
+    def diarize_args(self, tmp, minutes=2):
+        args = self.args(tmp)
+        args.operation, args.file, args.minutes = "diarize", str(Path(tmp) / "meeting.mp3"), minutes
+        args.output = str(Path(tmp) / "diarization.json")
+        Path(args.file).write_bytes(b"ID3 audio fixture")
+        return args
+
+    def test_diarize_service_price_id_and_quota_endpoint(self):
+        self.assertEqual(client.OPERATIONS["diarize"], ("diarize",))
+        self.assertEqual(client.price_id("diarize", "diarize"), "audio:diarize")
+        self.assertEqual(client.QUOTAS["diarize"], "/audio/diarize/quota")
+        self.assertIn("diarize", client.SYNCHRONOUS)
+        self.assertEqual(client.MAX_DIARIZE_MINUTES, 240)
+
+    def test_diarize_guard_counts_limit_minus_used_minutes(self):
+        price = {"prices": [{"model": "audio:diarize", "premium": False}]}
+        self.assertIsNone(client.guard("diarize", "diarize", limits(), price, self.diarize_quota(day_used=290), 10))
+        for quota_value in (self.diarize_quota(day_used=290), self.diarize_quota(month_used=2995)):
+            with self.subTest(quota=quota_value), self.assertRaises(client.Blocked) as raised:
+                client.guard("diarize", "diarize", limits(), price, quota_value, 11)
+            self.assertIn("Insufficient", str(raised.exception))
+        with self.assertRaises(client.Blocked):
+            client.guard("diarize", "diarize", limits(), {"prices": [{"model": "audio:diarize", "premium": True}]},
+                         self.diarize_quota(), 1)
+
+    def test_diarize_quota_shape_drift_blocks(self):
+        price = {"prices": [{"model": "audio:diarize", "premium": False}]}
+        good = self.diarize_quota()
+        drifted = [{}, dict(good, unit="second"), dict(good, tier="pro"), {k: v for k, v in good.items() if k != "month"},
+                   dict(good, day={"limit": 300}), dict(good, day={"used": True, "limit": 300}),
+                   dict(good, day={"used": -1, "limit": 300}), dict(good, month={"used": 0, "limit": "3000"}),
+                   dict(good, day={"used": 0, "limit": 300.0}), dict(good, day={"remaining": 300})]
+        for quota_value in drifted:
+            with self.subTest(quota=quota_value), self.assertRaises(client.Blocked):
+                client.guard("diarize", "diarize", limits(), price, quota_value, 1)
+
+    def test_diarize_refuses_more_than_four_hours(self):
+        price = {"prices": [{"model": "audio:diarize", "premium": False}]}
+        self.assertIsNone(client.guard("diarize", "diarize", limits(), price, self.diarize_quota(), 240))
+        with self.assertRaises(client.Blocked) as raised:
+            client.guard("diarize", "diarize", limits(), price, self.diarize_quota(), 241)
+        self.assertIn("4 hours", str(raised.exception))
+
+    def test_diarize_preflight_keeps_only_its_quota_fields(self):
+        price = {"prices": [{"model": "audio:diarize", "premium": False}]}
+        with patch.object(client, "request", side_effect=[limits(), price, self.diarize_quota()]) as req:
+            observed = client.preflight("diarize", "diarize", "fixture", 3)
+        self.assertEqual([c.args[:2] for c in req.call_args_list],
+                         [("GET", client.HUB + "/limits"), ("GET", client.PRICES), ("GET", client.HUB + "/audio/diarize/quota")])
+        self.assertEqual(observed["endpoint"], client.HUB + "/audio/diarize/quota")
+        self.assertEqual(observed["units_required"], 3)
+        self.assertEqual(observed["buckets"], {k: self.diarize_quota()[k] for k in ("unit", "day", "month")})
+
+    def test_diarize_run_posts_audio_once_and_saves_validated_json(self):
+        with tempfile.TemporaryDirectory() as tmp, patch.object(client, "SERVICE", "diarize"), \
+                patch.object(client, "resolve_key", return_value="fixture"), \
+                patch.object(client, "preflight", return_value={"units_required": 2}) as pre:
+            args = self.diarize_args(tmp)
+            with patch.object(client, "request", return_value=self.diarization()) as req:
+                result = client.execute(args)
+            self.assertEqual(req.call_count, 1)
+            method, url, key, body, content_type = req.call_args.args
+            self.assertEqual((method, url, key), ("POST", client.HUB + "/audio/diarize", "fixture"))
+            self.assertTrue(content_type.startswith("multipart/form-data; boundary="))
+            self.assertIn(b'name="file"; filename="upload.mp3"', body)
+            self.assertIn(b"ID3 audio fixture", body)
+            self.assertEqual(body.count(b"Content-Disposition"), 1)
+            self.assertEqual(pre.call_args.args[:4], ("diarize", "diarize", "fixture", 2))
+            self.assertEqual(result["status"], "completed")
+            self.assertIsNone(result["provider_job_id"])
+            self.assertEqual(json.loads(Path(args.output).read_text(encoding="utf-8")), self.diarization())
+            self.assertEqual(result["artifacts"][0]["provenance"]["endpoint"], client.HUB + "/audio/diarize")
+
+    def test_diarize_bad_response_requires_reconciliation(self):
+        good = self.diarization()
+        bad_segment = dict(good["segments"][0], start=6.0)
+        cases = [[], {}, dict(good, segments=None), dict(good, segments=[bad_segment]),
+                 dict(good, segments=[dict(good["segments"][0], speaker=None)]),
+                 dict(good, segments=[dict(good["segments"][0], end=float("nan"))]),
+                 dict(good, minutes_charged=True), dict(good, num_speakers=-1), dict(good, duration="61"),
+                 dict(good, error="unavailable")]
+        for response in cases:
+            with self.subTest(response=response), tempfile.TemporaryDirectory() as tmp, \
+                    patch.object(client, "SERVICE", "diarize"), patch.object(client, "resolve_key", return_value="fixture"), \
+                    patch.object(client, "preflight", return_value={}):
+                args = self.diarize_args(tmp)
+                with patch.object(client, "request", return_value=response) as req:
+                    result = client.execute(args)
+                # The minutes may have been charged: never report it as retryable.
+                self.assertEqual(result["status"], "reconciliation_required")
+                self.assertEqual(req.call_count, 1)
+                self.assertEqual(result["artifacts"], [])
+                self.assertFalse(Path(args.output).exists())
+                self.assertIn("diarization", result["errors"][0].lower())
+
+    def test_diarize_run_blocks_bad_input_before_any_request(self):
+        cases = {"no file": dict(file=None), "payload": dict(payload="extra.json"), "too large": dict()}
+        for case, changes in cases.items():
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as tmp, \
+                    patch.object(client, "SERVICE", "diarize"), patch.object(client, "resolve_key", return_value="fixture"), \
+                    patch.object(client, "MAX_DIARIZE_BYTES", 4):
+                args = self.diarize_args(tmp)
+                if case == "payload":
+                    Path(tmp, "extra.json").write_text('{"min_duration": 0.3}', encoding="utf-8")
+                    changes = dict(payload=str(Path(tmp, "extra.json")))
+                    args.file = str(Path(tmp) / "tiny.mp3")
+                    Path(args.file).write_bytes(b"ab")
+                for name, value in changes.items():
+                    setattr(args, name, value)
+                with patch.object(client, "request") as req:
+                    result = client.execute(args)
+                self.assertEqual(result["status"], "blocked")
+                req.assert_not_called()
+                self.assertFalse(Path(args.output).exists())
+
+    def test_diarize_is_synchronous_and_refuses_resume(self):
+        import io
+        import sys
+        with tempfile.TemporaryDirectory() as tmp, patch.object(client, "SERVICE", "diarize"), patch.object(client, "resolve_key", return_value="fixture"):
+            state = Path(tmp) / "state.json"
+            argv = ["client.py", "resume", "--job-id", "job-fixture", "--state", str(state), "--output", str(Path(tmp) / "result.json")]
+            with patch.object(client, "request") as req, patch.object(sys, "argv", argv), patch("sys.stdout", new_callable=io.StringIO) as out:
+                self.assertEqual(client.main(), 1)
+            result = json.loads(out.getvalue())
+            self.assertIn("Synchronous diarize has no resumable job endpoint", result["errors"][0])
+            self.assertFalse(state.exists())
+            req.assert_not_called()
+
+    def test_cli_minutes_flag_reaches_the_guard(self):
+        import io
+        import sys
+        price = {"prices": [{"model": "audio:diarize", "premium": False}]}
+        for minutes, expected, code in (("7", "ready", 0), ("0", "blocked", 1)):
+            with self.subTest(minutes=minutes), patch.object(client, "SERVICE", "diarize"), \
+                    patch.object(client, "resolve_key", return_value="fixture"), \
+                    patch.object(client, "request", side_effect=[limits(), price, self.diarize_quota()]), \
+                    patch.object(sys, "argv", ["client.py", "check", "--minutes", minutes]), patch("sys.stdout", new_callable=io.StringIO) as out:
+                self.assertEqual(client.main(), code)
+            result = json.loads(out.getvalue())
+            self.assertEqual(result["status"], expected)
+            if expected == "ready":
+                self.assertEqual(result["quota_observed"]["units_required"], 7)
+
+    def test_minutes_flag_and_merge_are_diarization_only(self):
+        import io
+        import sys
+        cases = [("search", ["check", "web", "--minutes", "3"]), ("whisper", ["check", "--minutes", "3"]),
+                 ("ocr", ["merge", "--diarization", "d.json", "--transcript", "t.json"]),
+                 ("diarize", ["merge", "--diarization", "d.json"]),
+                 ("diarize", ["check", "--transcript", "t.json"])]
+        for service, argv in cases:
+            with self.subTest(service=service, argv=argv), patch.object(client, "SERVICE", service), \
+                    patch.object(client, "request") as req, patch.object(client, "resolve_key") as key, \
+                    patch.object(sys, "argv", ["client.py", *argv]), patch("sys.stdout", new_callable=io.StringIO), \
+                    patch("sys.stderr", new_callable=io.StringIO):
+                with self.assertRaises(SystemExit) as raised:
+                    client.main()
+            self.assertEqual(raised.exception.code, 2)
+            req.assert_not_called()
+            key.assert_not_called()
+
+    def transcript_json(self):
+        # OpenAI verbose_json style, also the shape of a SpeechCore transcript.
+        return {"text": "Hello there. Hi. How are you? Fine.", "segments": [
+            {"start": 0.0, "end": 2.0, "text": " Hello there."},
+            {"start": 2.5, "end": 5.0, "text": " Hi."},
+            {"start": 17.0, "end": 19.0, "text": " How are you?"},
+            {"start": 19.0, "end": 21.0, "text": " Fine."},
+            {"start": 30.0, "end": 31.0, "text": " Bye."}]}
+
+    def test_merge_assigns_each_segment_to_the_speaker_with_most_overlap(self):
+        merged = client.merge_transcript(self.diarization(), self.transcript_json())
+        self.assertEqual(merged["speakers"], ["SPEAKER_0", "SPEAKER_1"])
+        self.assertEqual(merged["turns"], [
+            {"speaker": "SPEAKER_0", "start": 0.0, "end": 5.0, "text": "Hello there. Hi."},
+            {"speaker": "SPEAKER_1", "start": 17.0, "end": 21.0, "text": "How are you? Fine."},
+            {"speaker": None, "start": 30.0, "end": 31.0, "text": "Bye."}])
+        self.assertEqual(merged["unassigned_segments"], 1)
+
+    def test_merge_breaks_overlap_ties_by_first_appearance(self):
+        diarization = dict(self.diarization(), segments=[
+            {"speaker": "SPEAKER_0", "start": 0.0, "end": 1.0}, {"speaker": "SPEAKER_1", "start": 1.0, "end": 2.0},
+            {"speaker": "SPEAKER_1", "start": 3.0, "end": 4.0}])
+        transcript = {"segments": [{"start": 0.0, "end": 2.0, "text": "tie"},
+                                   {"start": 0.5, "end": 4.0, "text": "more"}, {"start": 5, "end": 5, "text": "  "}]}
+        merged = client.merge_transcript(diarization, transcript)
+        self.assertEqual([(t["speaker"], t["text"]) for t in merged["turns"]], [("SPEAKER_0", "tie"), ("SPEAKER_1", "more")])
+        self.assertEqual(merged["unassigned_segments"], 0)
+
+    def test_merge_rejects_invalid_inputs(self):
+        good_t, good_d = self.transcript_json(), self.diarization()
+        cases = [(good_d, {}), (good_d, {"segments": [{"start": 1, "end": 0, "text": "x"}]}),
+                 (good_d, {"segments": [{"start": 0, "end": 1}]}), (good_d, []),
+                 ({}, good_t), (dict(good_d, segments=[{"speaker": 1, "start": 0, "end": 1}]), good_t),
+                 (dict(good_d, minutes_charged=None), good_t)]
+        for diarization, transcript in cases:
+            with self.subTest(diarization=diarization, transcript=transcript), self.assertRaises(client.Blocked):
+                client.merge_transcript(diarization, transcript)
+
+    def merge_cli(self, tmp, diarization, transcript, output=None):
+        import io
+        import sys
+        d, t = Path(tmp) / "diarization.json", Path(tmp) / "transcript.json"
+        d.write_text(json.dumps(diarization), encoding="utf-8")
+        t.write_text(json.dumps(transcript, ensure_ascii=False), encoding="utf-8")
+        output = output or str(Path(tmp) / "speakers.json")
+        argv = ["client.py", "merge", "--diarization", str(d), "--transcript", str(t), "--output", output]
+        with patch.object(client, "SERVICE", "diarize"), patch.object(client, "request") as req, \
+                patch.object(client, "resolve_key") as key, patch.object(sys, "argv", argv), \
+                patch("sys.stdout", new_callable=io.StringIO) as out:
+            code = client.main()
+        req.assert_not_called()
+        key.assert_not_called()
+        return code, json.loads(out.getvalue()), Path(output)
+
+    def test_merge_cli_is_offline_and_writes_a_hashed_artifact(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            code, result, output = self.merge_cli(tmp, self.diarization(), self.transcript_json())
+            data = output.read_bytes()
+            merged = json.loads(data.decode("utf-8"))
+            self.assertEqual(code, 0)
+            self.assertEqual(result["status"], "completed")
+            self.assertEqual(result["service"], "diarize")
+            self.assertIsNone(result["provider_job_id"])
+            self.assertEqual(result["artifacts"][0]["sha256"], client.hashlib.sha256(data).hexdigest())
+            self.assertEqual(result["artifacts"][0]["provenance"]["trust"], "untrusted_data")
+            self.assertEqual(merged["turns"], client.merge_transcript(self.diarization(), self.transcript_json())["turns"])
+            sources = merged["sources"]
+            for name in ("diarization", "transcript"):
+                self.assertEqual(sources[name], client.hashlib.sha256(Path(tmp, name + ".json").read_bytes()).hexdigest())
+            self.assertNotIn("Hello", json.dumps(result))
+
+    def test_merge_cli_blocks_bad_input_without_output(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            code, result, output = self.merge_cli(tmp, self.diarization(), {"segments": "x"})
+            self.assertEqual((code, result["status"]), (1, "blocked"))
+            self.assertIn("transcript", result["errors"][0].lower())
+            self.assertFalse(output.exists())
+        with tempfile.TemporaryDirectory() as tmp:
+            same = str(Path(tmp) / "transcript.json")
+            code, result, _ = self.merge_cli(tmp, self.diarization(), self.transcript_json(), output=same)
+            self.assertEqual((code, result["status"]), (1, "blocked"))
+            self.assertEqual(json.loads(Path(same).read_text(encoding="utf-8")), self.transcript_json())
 
 if __name__ == "__main__":
     unittest.main()

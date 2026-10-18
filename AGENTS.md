@@ -47,7 +47,7 @@ CI (`.github/workflows/tests.yml`) runs the suite and `--help` on Python 3.10 an
 - **Test first.** Add or change a test, show it fails, then fix. Record the change
   and the new test count in `TESTING.md`.
 - **Keep the shared helper identical.** `scripts/client.py` is shared with
-  neuraldeep-search, -images, -ocr and -whisper-1; only the `SERVICE = "..."` line
+  neuraldeep-search, -images, -ocr, -transcriptions and -diarization; only the `SERVICE = "..."` line
   differs. Port any helper change to the other repos, and check with:
 
   ```bash
