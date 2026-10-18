@@ -366,3 +366,14 @@ state JSON. The new shared test failed first. **119 tests passed** (1 skipped
 outside a tag build), both normally and with `LC_ALL=C PYTHONUTF8=0`, with no
 `EncodingWarning` under `-X warn_default_encoding`, and on Python 3.10.22
 (Docker `python:3.10-slim`, non-root, no network).
+
+## Eighth cross-review fixes
+
+Port from neuraldeep-diarization `14c0056`. The U+FFFD repair for non-UTF-8
+file names applies to the RTTM file ID only, so speaker labels with lone
+surrogates block as in the other formats instead of merging; the
+input-is-the-state test also covers a dangling symlink. The new RTTM test
+failed first. **120 tests passed** (1 skipped outside a tag build), both
+normally and with `LC_ALL=C PYTHONUTF8=0`, with no `EncodingWarning` under
+`-X warn_default_encoding`, and on Python 3.10.22 (Docker `python:3.10-slim`,
+non-root, no network).

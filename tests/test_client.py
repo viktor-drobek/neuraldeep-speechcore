@@ -1381,12 +1381,15 @@ class SafetyTests(unittest.TestCase):
 
     # Seventh cross-review (2026-10-18).
     def test_input_file_that_is_the_state_file_is_never_sent(self):
-        for service in ("diarize", "ocr"):
-            with self.subTest(service=service), tempfile.TemporaryDirectory() as tmp, \
+        for service, via in (("diarize", "same path"), ("ocr", "same path"), ("diarize", "symlink")):
+            with self.subTest(service=service, via=via), tempfile.TemporaryDirectory() as tmp, \
                     patch.object(client, "SERVICE", service), patch.object(client, "resolve_key", return_value="fixture"):
                 args = self.diarize_args(tmp)
                 args.operation = client.OPERATIONS[service][0]
                 args.file = args.state = str(Path(tmp) / "x.json")  # does not exist yet
+                if via == "symlink":  # a dangling link to the future state file
+                    args.file = str(Path(tmp) / "link.mp3")
+                    os.symlink(args.state, args.file)
                 with patch.object(client, "preflight") as pre, patch.object(client, "request") as req, \
                         patch.object(client, "multipart") as body:
                     result = client.execute(args)
@@ -1395,6 +1398,21 @@ class SafetyTests(unittest.TestCase):
                 pre.assert_not_called()
                 req.assert_not_called()
                 body.assert_not_called()
+
+    # Eighth cross-review (2026-10-18).
+    def test_rttm_never_merges_speakers_with_broken_labels(self):
+        import io
+        import sys
+        with tempfile.TemporaryDirectory() as tmp:
+            d = Path(tmp) / "broken.json"
+            d.write_text('{"duration": 3.0, "num_speakers": 2, "minutes_charged": 1, "segments": ['
+                         '{"speaker": "\\udce9", "start": 0, "end": 1}, {"speaker": "\\udcea", "start": 1, "end": 2}]}',
+                         encoding="utf-8")
+            argv = ["client.py", "merge", "--diarization", str(d), "--format", "rttm", "--output", str(Path(tmp) / "out.rttm")]
+            with patch.object(client, "SERVICE", "diarize"), patch.object(sys, "argv", argv), patch("sys.stdout", new_callable=io.StringIO) as out:
+                self.assertEqual(client.main(), 1)
+            self.assertEqual(json.loads(out.getvalue())["errors"], ["Input text is not valid Unicode"])
+            self.assertFalse((Path(tmp) / "out.rttm").exists())
 
     def test_merge_cli_is_offline_and_writes_a_hashed_artifact(self):
         with tempfile.TemporaryDirectory() as tmp:

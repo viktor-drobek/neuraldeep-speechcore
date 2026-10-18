@@ -391,10 +391,12 @@ def to_srt(items):
 
 def to_rttm(diarization, file_id):
     def token(value):
-        # A file name that is not UTF-8 arrives with surrogate escapes; show them as U+FFFD.
-        value = value.encode("utf-8", "surrogateescape").decode("utf-8", "replace")
         return re.sub(r"\s+", "_", value.strip()) or "_"
-    return "".join(f"SPEAKER {token(file_id)} 1 {s['start']:.3f} {s['end'] - s['start']:.3f} <NA> <NA> "
+    # Only the file name may carry surrogate escapes (bytes that are not UTF-8): show
+    # them as U+FFFD. Speaker labels keep theirs, so a broken label fails to encode
+    # and blocks, as in the other formats, instead of merging with another speaker.
+    name = token(file_id.encode("utf-8", "surrogateescape").decode("utf-8", "replace"))
+    return "".join(f"SPEAKER {name} 1 {s['start']:.3f} {s['end'] - s['start']:.3f} <NA> <NA> "
                    f"{token(s['speaker'])} <NA> <NA>\n" for s in diarization["segments"])
 
 
@@ -426,10 +428,7 @@ def merge_files(args):
             validate_diarization(values[0])
         except (ValueError, TypeError):
             raise Blocked("Diarization input does not match the /v1/audio/diarize JSON shape") from None
-        try:
-            text = to_rttm(values[0], sources[0].stem)
-        except UnicodeEncodeError:  # a speaker label with a lone surrogate escape
-            raise Blocked("Input text is not valid Unicode") from None
+        text = to_rttm(values[0], sources[0].stem)
     elif fmt in ("vtt", "srt"):
         # Subtitles keep each transcript segment's own timing.
         _, labeled = label_segments(*values)
