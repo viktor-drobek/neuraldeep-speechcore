@@ -344,3 +344,15 @@ shared tests failed first. **115 tests passed** (1 skipped outside a tag build),
 both normally and with `LC_ALL=C PYTHONUTF8=0`, with no `EncodingWarning` under
 `-X warn_default_encoding`, and on Python 3.10.22 (Docker `python:3.10-slim`,
 non-root, no network).
+
+## Sixth cross-review fixes
+
+Port from neuraldeep-diarization `5916a17`. An output that is the state file
+through a case alias blocks once the state exists, before any request; a new
+output name is created with `O_EXCL` and removed before the preflight, so names
+vfat, exFAT or SMB refuse on create block early; consecutive unassigned merge
+segments stay separate turns. The new shared tests failed first.
+**118 tests passed** (1 skipped outside a tag build), both normally and with
+`LC_ALL=C PYTHONUTF8=0`, with no `EncodingWarning` under
+`-X warn_default_encoding`, and on Python 3.10.22 (Docker `python:3.10-slim`,
+non-root, no network).

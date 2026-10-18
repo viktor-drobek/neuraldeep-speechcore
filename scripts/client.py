@@ -352,7 +352,8 @@ def merge_transcript(diarization, transcript):
     speakers, labeled = label_segments(diarization, transcript)
     turns = []
     for item in labeled:
-        if turns and turns[-1]["speaker"] == item["speaker"]:
+        # Unassigned segments stay apart: two unknown voices need not be one.
+        if item["speaker"] is not None and turns and turns[-1]["speaker"] == item["speaker"]:
             turns[-1]["end"] = max(turns[-1]["end"], item["end"])
             turns[-1]["text"] += " " + item["text"]
         else:
@@ -559,7 +560,12 @@ def execute(args):
         try:
             os.lstat(output)
         except FileNotFoundError:
-            pass
+            # vfat, exFAT and SMB refuse some names only when they are created.
+            try:
+                os.close(os.open(output, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600))
+                os.unlink(output)
+            except OSError:
+                raise Blocked("Artifact path is not usable") from None
         except OSError:  # for example a name longer than the file system allows
             raise Blocked("Artifact path is not usable") from None
         if replace_denied(output.absolute()):
@@ -586,6 +592,9 @@ def execute(args):
     post_timeout = diarize_timeout(units) if SERVICE == "diarize" and type(units) is int else REQUEST_TIMEOUT
     state["timeouts"] = {"request_seconds": post_timeout, "poll_seconds": args.timeout}
     try:
+        # A case alias of the state file only matches once the state exists.
+        if same_file(args.output, args.state):
+            raise Blocked("State and artifact paths must differ")
         if args.command == "run":
             method, url, body, content_type = submission(args)
             state["quota_observed"] = preflight(SERVICE, args.operation, key, units, model=getattr(args, "model", None))

@@ -1326,6 +1326,59 @@ class SafetyTests(unittest.TestCase):
             self.assertEqual(result["status"], "completed")
             self.assertEqual(json.loads(Path(args.output).read_text(encoding="utf-8")), answer)
 
+    # Sixth cross-review (2026-10-18).
+    def test_state_and_output_that_are_one_file_are_refused(self):
+        real_samefile = os.path.samefile
+
+        def case_insensitive(a, b):  # simulate macOS or Windows
+            pa, pb = Path(a), Path(b)
+            # Both names are one file there as soon as either exists.
+            if pa.parent == pb.parent and pa.name.lower() == pb.name.lower() and (pa.exists() or pb.exists()):
+                return True
+            return real_samefile(a, b)
+
+        with tempfile.TemporaryDirectory() as tmp, patch.object(client, "SERVICE", "diarize"), \
+                patch.object(client, "resolve_key", return_value="fixture"), \
+                patch.object(client.os.path, "samefile", side_effect=case_insensitive):
+            args = self.diarize_args(tmp)
+            args.state, args.output = str(Path(tmp) / "Diarization.json"), str(Path(tmp) / "diarization.json")
+            with patch.object(client, "preflight") as pre, patch.object(client, "request") as req:
+                result = client.execute(args)
+            self.assertEqual(result["status"], "blocked")
+            self.assertIn("State and artifact paths must differ", result["errors"][0])
+            pre.assert_not_called()
+            req.assert_not_called()
+
+    def test_run_probes_that_the_output_name_can_be_created(self):
+        real_open = os.open
+        with tempfile.TemporaryDirectory() as tmp, patch.object(client, "SERVICE", "diarize"), \
+                patch.object(client, "resolve_key", return_value="fixture"):
+            args = self.diarize_args(tmp)
+            args.output = str(Path(tmp) / "meeting:1.json")
+
+            def fat_open(path, flags, *rest):  # vfat refuses ':' on create, not on lookup
+                if str(path) == args.output:
+                    raise OSError(22, "Invalid argument")
+                return real_open(path, flags, *rest)
+
+            with patch.object(client.os, "open", side_effect=fat_open), patch.object(client, "request") as req, \
+                    self.assertRaises(client.Blocked) as raised:
+                client.execute(args)
+            req.assert_not_called()
+            self.assertIn("not usable", str(raised.exception))
+            # A usable name is probed and removed again before the preflight.
+            args.output, args.state = str(Path(tmp) / "fine.json"), str(Path(tmp) / "state2.json")
+            with patch.object(client, "request", side_effect=client.RequestError("HTTP 503")):
+                self.assertEqual(client.execute(args)["status"], "blocked")
+            self.assertFalse(Path(args.output).exists())
+
+    def test_unassigned_segments_stay_separate_turns(self):
+        transcript = {"segments": [{"start": 10.0, "end": 12.0, "text": "one"}, {"start": 40.0, "end": 41.0, "text": "two"}]}
+        merged = client.merge_transcript(self.diarization(), transcript)
+        self.assertEqual([(t["speaker"], t["start"], t["end"], t["text"]) for t in merged["turns"]],
+                         [(None, 10.0, 12.0, "one"), (None, 40.0, 41.0, "two")])
+        self.assertEqual(merged["unassigned_segments"], 2)
+
     def test_merge_cli_is_offline_and_writes_a_hashed_artifact(self):
         with tempfile.TemporaryDirectory() as tmp:
             code, result, output = self.merge_cli(tmp, self.diarization(), self.transcript_json())
