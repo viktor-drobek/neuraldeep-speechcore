@@ -74,7 +74,8 @@ Before any request, `run` also checks where the paid result will go: an
 `--output` that is the input file (also through a link or a case alias), a
 name the file system refuses ("Artifact path is not usable"; a new name is
 created and removed again to find names vfat or exFAT reject), the state file
-under a case alias, or a directory, and an input file that is the state file
+under a case alias, a directory, an existing FIFO, socket or device (also
+behind a symlink: "Artifact path is not a regular file"), and an input file that is the state file
 ("Input file must differ from the state file"), or whose directory (before
 symlinks are resolved) is missing or read-only, blocks before the submission
 ("Artifact path must differ from the input file", "Artifact path is a

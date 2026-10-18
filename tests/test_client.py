@@ -12,6 +12,11 @@ SPEC.loader.exec_module(client)
 
 
 
+def stat_is_fifo(path):
+    import stat
+    return stat.S_ISFIFO(os.lstat(path).st_mode)
+
+
 def drain(body):
     """Read a streamed upload body the way http.client does, block by block."""
     return b"".join(iter(lambda: body.read(8192), b""))
@@ -1727,7 +1732,7 @@ class SafetyTests(unittest.TestCase):
             with self.subTest(code=code):
                 self.assertIn(f"| `{code}` |", section)
         for needle in ("Retry-After", "X-Window", "blocked", "reconciliation_required", "poll_error",
-                       "in the environment or `~/.coddy/.env`"):
+                       "in the environment or `~/.coddy/.env`", "never read the file yourself"):
             self.assertIn(needle, section)
 
     # Twelfth cross-review (2026-10-18).
@@ -1736,6 +1741,32 @@ class SafetyTests(unittest.TestCase):
             # Coddy reads .env line by line as bytes, so one cp1251 comment hides nothing.
             Path(tmp, ".env").write_bytes("# ключ для диаризации\n".encode("cp1251") + b"NEURALDEEP_DIARIZATION_API_KEY=sk-fixture\n")
             self.assertEqual(client.resolve_keys("diarize"), ("NEURALDEEP_DIARIZATION_API_KEY", ["sk-fixture"]))
+
+    # Thirteenth cross-review (2026-10-18).
+    def test_run_never_replaces_an_output_that_is_not_a_regular_file(self):
+        for case in ("fifo", "link to fifo", "link to device"):
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as tmp, patch.object(client, "SERVICE", "diarize"), \
+                    patch.object(client, "resolve_keys", return_value=("NEURALDEEP_API_KEY", ["fixture"])):
+                args = self.diarize_args(tmp)
+                fifo = Path(tmp) / "pipe"
+                os.mkfifo(fifo)
+                args.output = str(fifo) if case == "fifo" else str(Path(tmp) / "out.json")
+                if case != "fifo":
+                    os.symlink(fifo if case == "link to fifo" else os.devnull, args.output)
+                with patch.object(client, "request") as req, self.assertRaises(client.Blocked) as raised:
+                    client.execute(args)
+                req.assert_not_called()
+                self.assertIn("not a regular file", str(raised.exception))
+                self.assertTrue(stat_is_fifo(fifo))
+        # A dangling link is replaced by the answer like a missing file.
+        with tempfile.TemporaryDirectory() as tmp, patch.object(client, "SERVICE", "diarize"), \
+                patch.object(client, "resolve_keys", return_value=("NEURALDEEP_API_KEY", ["fixture"])), \
+                patch.object(client, "preflight", return_value={}):
+            args = self.diarize_args(tmp)
+            args.output = str(Path(tmp) / "out.json")
+            os.symlink(Path(tmp) / "nowhere.json", args.output)
+            with patch.object(client, "request", return_value=self.diarization()):
+                self.assertEqual(client.execute(args)["status"], "completed")
 
     def test_merge_cli_is_offline_and_writes_a_hashed_artifact(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -457,3 +457,16 @@ upload files it opens. The new shared tests failed first. **135 tests passed**
 with no `EncodingWarning` under `-X warn_default_encoding`, no `ResourceWarning`
 under `-W always::ResourceWarning`, and on Python 3.10.22 (Docker
 `python:3.10-slim`, non-root, no network).
+
+## Non-regular outputs and the 401 row
+
+Port from neuraldeep-diarization `0cf376e`. `run` blocks, before any request,
+an existing `--output` that is a FIFO, socket or device (also behind a
+symlink), which `atomic_write()` would replace after the paid request; a
+dangling symlink is still replaced like a missing file. The 401 row of the
+Error handling table asks the user to check the key and tells the agent never
+to read `~/.coddy/.env` itself. The new shared tests failed first.
+**136 tests passed** (1 skipped outside a tag build), both normally and with
+`LC_ALL=C PYTHONUTF8=0`, with no `EncodingWarning` under
+`-X warn_default_encoding`, and on Python 3.10.22 (Docker `python:3.10-slim`,
+non-root, no network).

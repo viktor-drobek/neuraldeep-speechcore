@@ -750,6 +750,19 @@ def execute(args):
         # os.path.isdir() is False on any OSError; Path.is_dir() raises EACCES before 3.13.
         if os.path.isdir(output):
             raise Blocked("Artifact path is a directory")
+        # A FIFO, a socket or a device (also behind a symlink) would be replaced by
+        # the answer; a dangling symlink is replaced like a missing file.
+        try:
+            existing = os.lstat(output)
+        except OSError:
+            existing = None
+        if existing is not None and stat.S_ISLNK(existing.st_mode):
+            try:
+                existing = os.stat(output)
+            except OSError:
+                existing = None
+        if existing is not None and not stat.S_ISREG(existing.st_mode):
+            raise Blocked("Artifact path is not a regular file")
         # atomic_write() replaces the path as given, in its own (unresolved) parent.
         parent = output.absolute().parent
         # mkstemp needs write and search permission, the directory fsync read permission.
