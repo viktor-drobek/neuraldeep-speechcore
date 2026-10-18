@@ -1263,13 +1263,17 @@ class SafetyTests(unittest.TestCase):
                 Path(args.file).write_bytes(b"x" * size)
                 with self.subTest(size=size):
                     if allowed:
-                        self.assertEqual(client.submission(args)[0], "POST")
+                        method, _, body, _ = client.submission(args)
+                        body.close()  # the upload file is open until it is sent
+                        self.assertEqual(method, "POST")
                     else:
                         with self.assertRaises(client.Blocked):
                             client.submission(args)
             with patch.object(client, "SERVICE", "ocr"):
                 Path(args.file).write_bytes(b"x" * 50)
-                self.assertEqual(client.submission(args)[0], "POST")
+                method, _, body, _ = client.submission(args)
+                body.close()
+                self.assertEqual(method, "POST")
 
     # Fourth cross-review (2026-10-18).
     def test_run_blocks_an_output_another_user_owns_in_a_sticky_directory(self):
@@ -1722,8 +1726,16 @@ class SafetyTests(unittest.TestCase):
         for code in client.ERROR_HINTS:
             with self.subTest(code=code):
                 self.assertIn(f"| `{code}` |", section)
-        for needle in ("Retry-After", "X-Window", "blocked", "reconciliation_required", "poll_error"):
+        for needle in ("Retry-After", "X-Window", "blocked", "reconciliation_required", "poll_error",
+                       "in the environment or `~/.coddy/.env`"):
             self.assertIn(needle, section)
+
+    # Twelfth cross-review (2026-10-18).
+    def test_a_non_utf8_byte_does_not_hide_the_rest_of_the_env_file(self):
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {"CODDY_HOME": tmp}, clear=True):
+            # Coddy reads .env line by line as bytes, so one cp1251 comment hides nothing.
+            Path(tmp, ".env").write_bytes("# ключ для диаризации\n".encode("cp1251") + b"NEURALDEEP_DIARIZATION_API_KEY=sk-fixture\n")
+            self.assertEqual(client.resolve_keys("diarize"), ("NEURALDEEP_DIARIZATION_API_KEY", ["sk-fixture"]))
 
     def test_merge_cli_is_offline_and_writes_a_hashed_artifact(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -103,8 +103,9 @@ def parse_dotenv_line(line):
 def read_dotenv(home):
     """The assignments of home/.env; the first one of a name wins, as in Coddy."""
     try:
-        text = (Path(home) / ".env").read_text(encoding="utf-8")
-    except (OSError, ValueError):
+        # Coddy reads bytes line by line, so a stray non-UTF-8 byte hides nothing else.
+        text = (Path(home) / ".env").read_bytes().decode("utf-8", "replace")
+    except OSError:
         return {}
     values = {}
     for line in text.splitlines():

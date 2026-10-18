@@ -215,7 +215,7 @@ when it happens:
 | Code | What the provider documents | What to do |
 |---|---|---|
 | `400` | Invalid request body, or a request longer than allowed | Fix the input; a billed submission is reconciled first |
-| `401` | Key invalid or revoked, or not subscribed to the model | Check the key in `NEURALDEEP_SPEECHCORE_API_KEY` (or `NEURALDEEP_API_KEY`) in `~/.coddy/.env` |
+| `401` | Key invalid or revoked, or not subscribed to the model | Check the key in `NEURALDEEP_SPEECHCORE_API_KEY` (or `NEURALDEEP_API_KEY`) in the environment or `~/.coddy/.env` |
 | `408` | Upstream timeout after the provider's own retries | Reconcile a submission; resume a job |
 | `422` | A parameter outside the allowed values | Fix the parameter |
 | `429` | A quota or rate limit; `X-Window` names the session or week window and `Retry-After` the wait | Check the quota with `check`; wait, then decide explicitly |

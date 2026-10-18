@@ -445,3 +445,15 @@ step with `ERROR_HINTS`. The three new shared tests failed first.
 `LC_ALL=C PYTHONUTF8=0`, with no `EncodingWarning` under
 `-X warn_default_encoding`, and on Python 3.10.22 (Docker `python:3.10-slim`,
 non-root, no network).
+
+## .env read as bytes
+
+Port from neuraldeep-diarization `69cedbd`. `read_dotenv()` decodes
+`${CODDY_HOME}/.env` with replacement, so one non-UTF-8 byte no longer hides
+every key in it, as in Coddy's line-by-line read; the Error handling table says
+the key may be in the environment or `~/.coddy/.env`; a cap test closes the
+upload files it opens. The new shared tests failed first. **135 tests passed**
+(1 skipped outside a tag build), both normally and with `LC_ALL=C PYTHONUTF8=0`,
+with no `EncodingWarning` under `-X warn_default_encoding`, no `ResourceWarning`
+under `-W always::ResourceWarning`, and on Python 3.10.22 (Docker
+`python:3.10-slim`, non-root, no network).
