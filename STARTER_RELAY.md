@@ -63,7 +63,8 @@ Before any request, `run` also checks where the paid result will go: an
 `--output` that is the input file or a directory, or whose directory (before
 symlinks are resolved) is missing or read-only, blocks before the submission
 ("Artifact path must differ from the input file", "Artifact path is a
-directory", "Artifact directory is missing or not writable").
+directory", "Artifact directory is missing or not writable"); the directory
+must be readable, writable and searchable.
 
 Choose a **new private state path** for new work. `run` refuses an existing
 state file, preventing accidental duplicate submissions. Do not delete or

@@ -383,13 +383,18 @@ def merge_files(args):
     sources = [Path(getattr(args, name)) for name in names]
     if Path(args.output).resolve() in {p.resolve() for p in sources}:
         raise Blocked("Output must differ from the inputs")
-    raw = [p.read_bytes() for p in sources]
+    raw = []
+    for name, path in zip(names, sources):
+        try:
+            raw.append(path.read_bytes())
+        except OSError:
+            raise Blocked(f"Cannot read the {name} file") from None
     hashes = {name: hashlib.sha256(data).hexdigest() for name, data in zip(names, raw)}
     values = []
     for name, data in zip(names, raw):
         try:
-            # Bytes let json accept a UTF-8 byte order mark.
-            values.append(json.loads(data))
+            # Strict UTF-8, with an optional byte order mark.
+            values.append(json.loads(data.decode("utf-8-sig")))
         except (ValueError, RecursionError):
             raise Blocked(f"{name.capitalize()} file is not valid UTF-8 JSON") from None
     if fmt == "rttm":
@@ -408,7 +413,14 @@ def merge_files(args):
     else:
         merged = merge_transcript(*values)
         text = json.dumps(dict(merged, sources=hashes), ensure_ascii=False, indent=2)
-    artifact = save_artifact(args.output, text.encode("utf-8"), "local:merge")
+    try:
+        data = text.encode("utf-8")
+    except UnicodeEncodeError:  # a lone surrogate escape such as "\ud83d"
+        raise Blocked("Input text is not valid Unicode") from None
+    try:
+        artifact = save_artifact(args.output, data, "local:merge")
+    except OSError:
+        raise Blocked("Cannot write the merge output") from None
     artifact["provenance"]["sources"] = hashes
     return {"status": "completed", "artifacts": [artifact]}
 
@@ -514,7 +526,8 @@ def execute(args):
             raise Blocked("Artifact path is a directory")
         # atomic_write() replaces the path as given, in its own (unresolved) parent.
         parent = output.absolute().parent
-        if not parent.is_dir() or not os.access(parent, os.W_OK):
+        # mkstemp needs write and search permission, the directory fsync read permission.
+        if not parent.is_dir() or not os.access(parent, os.R_OK | os.W_OK | os.X_OK):
             raise Blocked("Artifact directory is missing or not writable")
     if args.command == "resume":
         if SERVICE in SYNCHRONOUS:

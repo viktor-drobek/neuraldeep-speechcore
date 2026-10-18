@@ -1112,7 +1112,7 @@ class SafetyTests(unittest.TestCase):
     def test_run_checks_the_output_path_before_any_request(self):
         cases = ["output is the input", "missing directory", "existing directory", "current directory"]
         if os.geteuid() != 0:  # root ignores directory permissions
-            cases += ["read-only directory", "link in a read-only directory"]
+            cases += ["read-only directory", "link in a read-only directory", "unsearchable directory", "unreadable directory"]
         for case in cases:
             for service in ("diarize", "ocr"):
                 with self.subTest(case=case, service=service), tempfile.TemporaryDirectory() as tmp, \
@@ -1125,10 +1125,12 @@ class SafetyTests(unittest.TestCase):
                                    "missing directory": str(Path(tmp) / "missing" / "out.json"),
                                    "existing directory": tmp, "current directory": ".",
                                    "read-only directory": str(locked / "out.json"),
-                                   "link in a read-only directory": str(locked / "link.json")}[case]
+                                   "link in a read-only directory": str(locked / "link.json"),
+                                   "unsearchable directory": str(locked / "out.json"),
+                                   "unreadable directory": str(locked / "out.json")}[case]
                     if case == "link in a read-only directory":
                         (locked / "link.json").symlink_to(Path(tmp) / "target.json")
-                    locked.chmod(0o500)
+                    locked.chmod({"unsearchable directory": 0o600, "unreadable directory": 0o300}.get(case, 0o500))
                     try:
                         with patch.object(client, "request") as req, self.assertRaises(client.Blocked):
                             client.execute(args)
@@ -1247,6 +1249,37 @@ class SafetyTests(unittest.TestCase):
             code, result, _ = self.merge_cli(tmp, self.diarization(), self.transcript_json(), output=same)
             self.assertEqual((code, result["status"]), (1, "blocked"))
             self.assertEqual(json.loads(Path(same).read_text(encoding="utf-8")), self.transcript_json())
+        for fmt, transcript in (("json", self.transcript_json()), ("rttm", None)):
+            with self.subTest(fmt=fmt), tempfile.TemporaryDirectory() as tmp:
+                same = str(Path(tmp) / "diarization.json")
+                code, result, _ = self.merge_cli(tmp, self.diarization(), transcript, output=same, extra=["--format", fmt])
+                self.assertEqual((code, result["status"]), (1, "blocked"))
+                self.assertEqual(json.loads(Path(same).read_text(encoding="utf-8")), self.diarization())
+
+    # Third cross-review (2026-10-18).
+    def test_merge_insists_on_utf8(self):
+        cases = {"utf-16": json.dumps(self.transcript_json()).encode("utf-16"),
+                 "utf-32": json.dumps(self.transcript_json()).encode("utf-32"),
+                 "cesu-8 surrogate": b'{"segments": [{"start": 0, "end": 1, "text": "\xed\xa0\x80"}]}'}
+        for case, data in cases.items():
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as tmp:
+                Path(tmp, "transcript.json").write_bytes(data)
+                code, result, _ = self.merge_cli(tmp, self.diarization(), None, extra=["--transcript", str(Path(tmp, "transcript.json"))])
+                self.assertEqual((code, result["status"]), (1, "blocked"))
+                self.assertEqual(result["errors"], ["Transcript file is not valid UTF-8 JSON"])
+
+    def test_merge_local_failures_name_the_problem(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            missing = str(Path(tmp) / "absent.json")
+            code, result, _ = self.merge_cli(tmp, self.diarization(), None, extra=["--transcript", missing])
+            self.assertEqual(result["errors"], ["Cannot read the transcript file"])
+            code, result, _ = self.merge_cli(tmp, self.diarization(), self.transcript_json(), output=str(Path(tmp) / "no" / "out.json"))
+            self.assertEqual(result["errors"], ["Cannot write the merge output"])
+            lone = Path(tmp) / "lone.json"  # a valid JSON escape for an unpaired surrogate
+            lone.write_text('{"segments": [{"start": 0.0, "end": 2.0, "text": "\\ud83d"}]}', encoding="utf-8")
+            code, result, _ = self.merge_cli(tmp, self.diarization(), None, extra=["--transcript", str(lone)])
+            self.assertEqual(result["errors"], ["Input text is not valid Unicode"])
+            self.assertEqual(code, 1)
 
 if __name__ == "__main__":
     unittest.main()

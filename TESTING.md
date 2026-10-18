@@ -307,3 +307,15 @@ read-only and missing directory cases, which already passed.
 **106 tests passed** (1 skipped outside a tag build), both normally and with
 `LC_ALL=C PYTHONUTF8=0`, with no `EncodingWarning` under
 `-X warn_default_encoding`.
+
+## Third cross-review fixes
+
+Port from neuraldeep-diarization `e4bdae5`. `run` requires read, write and
+search permission on the output directory, since `atomic_write()` needs all
+three. `merge` decodes strict UTF-8 (a byte order mark is fine), so UTF-16,
+UTF-32 and surrogate bytes block; a missing input, an unwritable output and a
+lone surrogate escape block with their own messages. `--output` equal to
+`--diarization` is tested. The new shared tests failed first, apart from that
+coverage case. **108 tests passed** (1 skipped outside a tag build), both
+normally and with `LC_ALL=C PYTHONUTF8=0`, with no `EncodingWarning` under
+`-X warn_default_encoding`.
