@@ -32,7 +32,8 @@ DEFAULT_TRANSCRIPTION_MODEL = "gigaam-v3"
 SYNCHRONOUS = {"search", "whisper", "diarize"}
 # Provider limits for /v1/audio/diarize: up to 4 hours and 500 MB per file.
 MAX_DIARIZE_MINUTES = 240
-MAX_DIARIZE_BYTES = 500 * 1000 * 1000
+# Upload size limits the provider documents; the other services document none.
+UPLOAD_LIMITS = {"diarize": 500 * 1000 * 1000}
 # The diarization answer arrives on the POST itself, so a long file needs a long
 # read timeout: a cut-off answer may already be charged and must not be resent.
 REQUEST_TIMEOUT = 30
@@ -94,6 +95,9 @@ def request(method, url, key, body=None, content_type="application/json", *, tim
             {"api.neuraldeep.ru", "speechcore.neuraldeep.ru", "neuraldeep.ru"}):
         raise Blocked("Unapproved API origin")
     headers = {"Content-Type": content_type}
+    if hasattr(body, "read"):
+        # A streamed body: its known length keeps urllib from chunked encoding.
+        headers["Content-Length"] = str(len(body))
     if url != PRICES:
         headers["Authorization"] = "Bearer " + key
     req = Request(url, data=body, headers=headers, method=method)
@@ -107,6 +111,9 @@ def request(method, url, key, body=None, content_type="application/json", *, tim
         raise RequestError(f"HTTP {error.code}; no automatic retry") from None
     except (URLError, TimeoutError, OSError, ValueError, HTTPException):
         raise RequestError("Transport or response error; no automatic retry") from None
+    finally:
+        if hasattr(body, "close"):
+            body.close()
 
 
 def price_id(service, operation, model=None):
@@ -492,6 +499,53 @@ def job_urls(service, job_id):
     raise JobError(f"Synchronous {service} has no resumable job endpoint")
 
 
+class UploadBody:
+    """A multipart body read block by block, the way http.client sends a file.
+
+    No copy of the file is held in memory, and the socket timeout bounds each
+    block rather than the whole upload. Exactly `size` bytes of the file are
+    sent, the size the caller checked; a file that shrinks meanwhile raises.
+    The provider documents no resumable upload, so a broken upload is never
+    continued or resent.
+    """
+
+    BLOCK = 65536
+
+    def __init__(self, head, path, size, tail):
+        self.head, self.path, self.size, self.tail = head, path, size, tail
+        self.stage, self.left, self.file = 0, size, None
+
+    def __len__(self):
+        return len(self.head) + self.size + len(self.tail)
+
+    def read(self, n=-1):
+        n = self.BLOCK if n is None or n < 0 else n
+        if self.stage == 0:
+            self.stage = 1
+            return self.head
+        if self.stage == 1:
+            if self.left:
+                if self.file is None:
+                    self.file = open(self.path, "rb")
+                data = self.file.read(min(n, self.left))
+                if not data:
+                    self.close()
+                    raise OSError("Input file shrank during the upload")
+                self.left -= len(data)
+                return data
+            self.close()
+            self.stage = 2
+        if self.stage == 2:
+            self.stage = 3
+            return self.tail
+        return b""
+
+    def close(self):
+        if self.file is not None:
+            self.file.close()
+            self.file = None
+
+
 def multipart(path, field, fields):
     boundary = uuid.uuid4().hex
     # Local names may contain quotes or line breaks; never copy them into headers.
@@ -500,8 +554,9 @@ def multipart(path, field, fields):
     for name, value in fields.items():
         parts.append(f'--{boundary}\r\nContent-Disposition: form-data; name="{name}"\r\n\r\n{value}\r\n'.encode())
     parts.append(f'--{boundary}\r\nContent-Disposition: form-data; name="{field}"; filename="upload{suffix}"\r\nContent-Type: application/octet-stream\r\n\r\n'.encode())
-    parts.extend([Path(path).read_bytes(), f"\r\n--{boundary}--\r\n".encode()])
-    return b"".join(parts), "multipart/form-data; boundary=" + boundary
+    size = Path(path).stat().st_size
+    body = UploadBody(b"".join(parts), path, size, f"\r\n--{boundary}--\r\n".encode())
+    return body, "multipart/form-data; boundary=" + boundary
 
 
 def submission(args):
@@ -521,12 +576,14 @@ def submission(args):
         return "POST", url, json.dumps(payload).encode(), "application/json"
     if not args.file:
         raise Blocked("A local --file is required")
-    if SERVICE == "diarize" and Path(args.file).stat().st_size > MAX_DIARIZE_BYTES:
-        raise Blocked("Audio file is larger than 500 MB")
     fields = {"model_profile": args.profile} if SERVICE == "ocr" else {}
     if payload:
         raise Blocked("Extra multipart fields are not supported by this minimal helper")
     body, content_type = multipart(args.file, "file" if SERVICE in ("ocr", "diarize") else "image", fields)
+    # The size checked here is the size streamed: the body never sends more.
+    limit = UPLOAD_LIMITS.get(SERVICE)
+    if limit is not None and body.size > limit:
+        raise Blocked(f"Input file is larger than the documented {limit // 1000000} MB limit")
     return "POST", url, body, content_type
 
 

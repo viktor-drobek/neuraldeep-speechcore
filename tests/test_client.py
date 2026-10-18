@@ -11,6 +11,10 @@ client = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(client)
 
 
+
+def drain(body):
+    """Read a streamed upload body the way http.client does, block by block."""
+    return b"".join(iter(lambda: body.read(8192), b""))
 def limits():
     return {"tier": "starter", "key": {"status": "ok", "billing_mode": "subscription"},
             "decision": {"can_request": False}}
@@ -470,6 +474,7 @@ class SafetyTests(unittest.TestCase):
                 path = Path(tmp) / name
                 path.write_bytes(b"input-fixture")
                 body, content_type = client.multipart(path, "image", {})
+                body = drain(body)
                 part = body.split(b"--" + content_type.split("; boundary=")[1].encode())[1]
                 head = part.removeprefix(b"\r\n").split(b"\r\n\r\n", 1)[0].decode()
                 self.assertEqual(head.split("\r\n"), [f'Content-Disposition: form-data; name="image"; filename="{expected}"',
@@ -665,7 +670,9 @@ class SafetyTests(unittest.TestCase):
             path = Path(tmp) / "private-name.png"
             path.write_bytes(content)
             body, content_type = client.multipart(path, "image", {})
+            body = drain(body)
             ocr_body, ocr_type = client.multipart(path, "file", {"model_profile": "pro"})
+            ocr_body = drain(ocr_body)
         media, boundary = content_type.split("; boundary=")
         self.assertEqual(media, "multipart/form-data")
         delimiter = b"--" + boundary.encode()
@@ -700,7 +707,7 @@ class SafetyTests(unittest.TestCase):
             method, url, body, content_type = client.submission(args)
             self.assertEqual((method, url), ("POST", client.HUB + "/images/upscale"))
             self.assertTrue(content_type.startswith("multipart/form-data; boundary="))
-            self.assertIn(b'name="image"; filename="upload.png"', body)
+            self.assertIn(b'name="image"; filename="upload.png"', drain(body))
 
     def test_resume_of_edited_resumable_state_is_blocked_not_crashed(self):
         import io
@@ -847,6 +854,7 @@ class SafetyTests(unittest.TestCase):
                 result = client.execute(args)
             self.assertEqual(req.call_count, 1)
             method, url, key, body, content_type = req.call_args.args
+            body = drain(body)
             self.assertEqual((method, url, key), ("POST", client.HUB + "/audio/diarize", "fixture"))
             self.assertTrue(content_type.startswith("multipart/form-data; boundary="))
             self.assertIn(b'name="file"; filename="upload.mp3"', body)
@@ -885,7 +893,7 @@ class SafetyTests(unittest.TestCase):
         for case, changes in cases.items():
             with self.subTest(case=case), tempfile.TemporaryDirectory() as tmp, \
                     patch.object(client, "SERVICE", "diarize"), patch.object(client, "resolve_key", return_value="fixture"), \
-                    patch.object(client, "MAX_DIARIZE_BYTES", 4):
+                    patch.dict(client.UPLOAD_LIMITS, {"diarize": 4}):
                 args = self.diarize_args(tmp)
                 if case == "payload":
                     Path(tmp, "extra.json").write_text('{"min_duration": 0.3}', encoding="utf-8")
@@ -1209,8 +1217,9 @@ class SafetyTests(unittest.TestCase):
         self.assertEqual(merged["turns"][0]["speaker"], "A")
 
     def test_diarize_file_cap_is_500_mb_and_inclusive(self):
-        self.assertEqual(client.MAX_DIARIZE_BYTES, 500 * 1000 * 1000)
-        with tempfile.TemporaryDirectory() as tmp, patch.object(client, "SERVICE", "diarize"), patch.object(client, "MAX_DIARIZE_BYTES", 4):
+        # Only the limits a provider documents: diarization's 500 MB.
+        self.assertEqual(client.UPLOAD_LIMITS, {"diarize": 500 * 1000 * 1000})
+        with tempfile.TemporaryDirectory() as tmp, patch.object(client, "SERVICE", "diarize"), patch.dict(client.UPLOAD_LIMITS, {"diarize": 4}):
             args = self.diarize_args(tmp)
             for size, allowed in ((4, True), (5, False)):
                 Path(args.file).write_bytes(b"x" * size)
@@ -1220,6 +1229,9 @@ class SafetyTests(unittest.TestCase):
                     else:
                         with self.assertRaises(client.Blocked):
                             client.submission(args)
+            with patch.object(client, "SERVICE", "ocr"):
+                Path(args.file).write_bytes(b"x" * 50)
+                self.assertEqual(client.submission(args)[0], "POST")
 
     # Fourth cross-review (2026-10-18).
     def test_run_blocks_an_output_another_user_owns_in_a_sticky_directory(self):
@@ -1413,6 +1425,93 @@ class SafetyTests(unittest.TestCase):
                 self.assertEqual(client.main(), 1)
             self.assertEqual(json.loads(out.getvalue())["errors"], ["Input text is not valid Unicode"])
             self.assertFalse((Path(tmp) / "out.rttm").exists())
+
+    # Ninth cross-review (2026-10-18): streamed uploads.
+    def test_upload_body_streams_the_file_in_blocks(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            audio = Path(tmp) / "a.wav"
+            audio.write_bytes(bytes(range(256)) * 800)  # 204800 bytes
+            with patch.object(client.Path, "read_bytes", side_effect=AssertionError("loaded whole file")):
+                body, content_type = client.multipart(audio, "file", {})
+                blocks = list(iter(lambda: body.read(8192), b""))
+            boundary = content_type.split("; boundary=")[1].encode()
+            data = b"".join(blocks)
+            self.assertEqual(len(data), len(body))
+            self.assertTrue(data.startswith(b"--" + boundary + b"\r\n"))
+            self.assertIn(b"\r\n\r\n" + audio.read_bytes() + b"\r\n--" + boundary + b"--\r\n", data)
+            self.assertTrue(all(len(b) <= 8192 for b in blocks[1:-1]))
+            self.assertIsNone(body.file)  # closed after the last block
+
+    def test_upload_body_sends_exactly_the_checked_size(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            audio = Path(tmp) / "a.wav"
+            audio.write_bytes(b"x" * 10000)
+            body, _ = client.multipart(audio, "file", {})
+            with audio.open("ab") as grow:
+                grow.write(b"y" * 5000)
+            data = drain(body)
+            self.assertEqual(len(data), len(body))
+            self.assertNotIn(b"yy", data)
+            self.assertEqual(data.count(b"x"), 10000)
+            body, _ = client.multipart(audio, "file", {})
+            audio.write_bytes(b"x" * 10)
+            with self.assertRaises(OSError):
+                drain(body)
+            self.assertIsNone(body.file)
+
+    def test_http_client_sends_the_body_block_by_block(self):
+        import http.client
+
+        class Sock:
+            def __init__(self):
+                self.sent, self.first = [], None
+
+            def sendall(self, data):
+                self.first = data if self.first is None else self.first
+                self.sent.append(len(data))
+
+        with tempfile.TemporaryDirectory() as tmp:
+            audio = Path(tmp) / "a.wav"
+            audio.write_bytes(b"z" * 100000)
+            body, content_type = client.multipart(audio, "file", {})
+            conn = http.client.HTTPSConnection("api.neuraldeep.ru")
+            conn.sock = Sock()
+            conn.request("POST", "/v1/audio/diarize", body=body,
+                         headers={"Content-Type": content_type, "Content-Length": str(len(body))})
+            # Each sendall is one socket-timeout window: no single send carries the whole file.
+            self.assertGreater(len(conn.sock.sent), 10)
+            self.assertLessEqual(max(conn.sock.sent[1:]), 8192)
+            self.assertIn(b"Content-Length: %d\r\n" % len(body), self.first_or(conn.sock))
+            self.assertNotIn(b"Transfer-Encoding", self.first_or(conn.sock))
+
+    def first_or(self, sock):
+        return bytes(sock.first)
+
+    def test_request_streams_a_body_with_its_length_and_closes_it(self):
+        from unittest.mock import MagicMock  # not every sibling suite imports it
+        with tempfile.TemporaryDirectory() as tmp:
+            audio = Path(tmp) / "a.wav"
+            audio.write_bytes(b"q" * 30000)
+            for outcome in ("ok", "error"):
+                with self.subTest(outcome=outcome):
+                    body, content_type = client.multipart(audio, "file", {})
+                    body.read(10)  # start streaming so a file handle is open
+                    body.read(10)
+                    opener = MagicMock()
+                    if outcome == "ok":
+                        response = opener.open.return_value.__enter__.return_value
+                        response.read.return_value = b"{}"
+                        response.headers.get.return_value = "application/json"
+                        client.request("POST", client.HUB + "/audio/diarize", "fixture", body, content_type, opener=opener)
+                    else:
+                        opener.open.side_effect = TimeoutError()
+                        with self.assertRaises(client.RequestError):
+                            client.request("POST", client.HUB + "/audio/diarize", "fixture", body, content_type, opener=opener)
+                    sent = opener.open.call_args.args[0]
+                    self.assertIs(sent.data, body)
+                    self.assertEqual(sent.get_header("Content-length"), str(len(body)))
+                    self.assertIsNone(sent.get_header("Transfer-encoding"))
+                    self.assertIsNone(body.file)
 
     def test_merge_cli_is_offline_and_writes_a_hashed_artifact(self):
         with tempfile.TemporaryDirectory() as tmp:

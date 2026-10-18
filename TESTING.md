@@ -377,3 +377,17 @@ failed first. **120 tests passed** (1 skipped outside a tag build), both
 normally and with `LC_ALL=C PYTHONUTF8=0`, with no `EncodingWarning` under
 `-X warn_default_encoding`, and on Python 3.10.22 (Docker `python:3.10-slim`,
 non-root, no network).
+
+## Streamed uploads
+
+Port from neuraldeep-diarization `3b918a7`. `multipart()` returns an
+`UploadBody` that `http.client` reads in 64 KB blocks with a normal
+`Content-Length`, so the socket timeout bounds each block, not the whole
+upload, and no copy of the file is held in memory; exactly the checked size is
+sent. The provider documents no chunked or resumable upload, so a broken upload
+is never resent. `UPLOAD_LIMITS` keeps only documented limits (diarize
+500 MB); this service documents none. The shared multipart tests read the body
+with `drain()`. The new shared tests failed first. **124 tests passed**
+(1 skipped outside a tag build), both normally and with `LC_ALL=C PYTHONUTF8=0`,
+with no `EncodingWarning` under `-X warn_default_encoding`, and on Python
+3.10.22 (Docker `python:3.10-slim`, non-root, no network).
