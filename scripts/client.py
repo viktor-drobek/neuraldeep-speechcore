@@ -202,6 +202,16 @@ def atomic_write(path, data):
             os.unlink(tmp)
 
 
+def same_file(path, other):
+    """True for the same file under another name: a symlink, a hard link or a case alias."""
+    if Path(path).resolve() == Path(other).resolve():
+        return True
+    try:
+        return os.path.samefile(path, other)
+    except OSError:
+        return False
+
+
 def replace_denied(path):
     """True when rename(2) may not replace path: another user's file in a sticky directory."""
     try:
@@ -394,7 +404,7 @@ def merge_files(args):
     fmt = getattr(args, "format", "json")
     names = ("diarization",) if fmt == "rttm" else ("diarization", "transcript")
     sources = [Path(getattr(args, name)) for name in names]
-    if Path(args.output).resolve() in {p.resolve() for p in sources}:
+    if any(same_file(args.output, p) for p in sources):
         raise Blocked("Output must differ from the inputs")
     raw = []
     for name, path in zip(names, sources):
@@ -415,7 +425,10 @@ def merge_files(args):
             validate_diarization(values[0])
         except (ValueError, TypeError):
             raise Blocked("Diarization input does not match the /v1/audio/diarize JSON shape") from None
-        text = to_rttm(values[0], sources[0].stem)
+        try:
+            text = to_rttm(values[0], sources[0].stem)
+        except UnicodeEncodeError:  # a speaker label with a lone surrogate escape
+            raise Blocked("Input text is not valid Unicode") from None
     elif fmt in ("vtt", "srt"):
         # Subtitles keep each transcript segment's own timing.
         _, labeled = label_segments(*values)
@@ -533,7 +546,7 @@ def execute(args):
     if args.command == "run":
         # A paid answer must have somewhere to go and must not replace its own input.
         output = Path(args.output)
-        if args.file and output.resolve() == Path(args.file).resolve():
+        if args.file and same_file(output, args.file):
             raise Blocked("Artifact path must differ from the input file")
         # os.path.isdir() is False on any OSError; Path.is_dir() raises EACCES before 3.13.
         if os.path.isdir(output):
@@ -543,6 +556,12 @@ def execute(args):
         # mkstemp needs write and search permission, the directory fsync read permission.
         if not os.path.isdir(parent) or not os.access(parent, os.R_OK | os.W_OK | os.X_OK):
             raise Blocked("Artifact directory is missing or not writable")
+        try:
+            os.lstat(output)
+        except FileNotFoundError:
+            pass
+        except OSError:  # for example a name longer than the file system allows
+            raise Blocked("Artifact path is not usable") from None
         if replace_denied(output.absolute()):
             raise Blocked("Artifact path belongs to another user in a sticky directory")
     if args.command == "resume":
@@ -587,7 +606,8 @@ def execute(args):
                     validate_diarization(response)
                 except (ValueError, TypeError):
                     raise JobError("Unrecognized diarization response") from None
-                data = json.dumps(response, ensure_ascii=False, indent=2).encode()
+                # ASCII escapes keep even a lone surrogate in a paid answer writable.
+                data = json.dumps(response, indent=2).encode()
                 result_url = url
             else:
                 state["provider_job_id"] = response.get(JOB_ID_FIELDS[SERVICE])

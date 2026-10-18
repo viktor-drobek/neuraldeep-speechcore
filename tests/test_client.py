@@ -1272,6 +1272,60 @@ class SafetyTests(unittest.TestCase):
         self.assertEqual(merged["speakers"], ["B", "A"])
         self.assertEqual(merged["turns"][0]["speaker"], "B")
 
+    # Fifth cross-review (2026-10-18).
+    def test_run_blocks_an_output_name_the_system_refuses(self):
+        with tempfile.TemporaryDirectory() as tmp, patch.object(client, "SERVICE", "diarize"), \
+                patch.object(client, "resolve_key", return_value="fixture"):
+            args = self.diarize_args(tmp)
+            args.output = str(Path(tmp) / ("x" * 256 + ".json"))
+            with patch.object(client, "request") as req, self.assertRaises(client.Blocked) as raised:
+                client.execute(args)
+            req.assert_not_called()
+            self.assertIn("not usable", str(raised.exception))
+
+    def test_aliases_of_an_input_are_refused_as_output(self):
+        with tempfile.TemporaryDirectory() as tmp, patch.object(client, "SERVICE", "diarize"), \
+                patch.object(client, "resolve_key", return_value="fixture"):
+            args = self.diarize_args(tmp)
+            alias = Path(tmp) / "alias.mp3"
+            os.link(args.file, alias)  # a hard link resolves to a different path
+            args.output = str(alias)
+            with patch.object(client, "request") as req, self.assertRaises(client.Blocked):
+                client.execute(args)
+            req.assert_not_called()
+            self.assertEqual(Path(args.file).read_bytes(), b"ID3 audio fixture")
+        with tempfile.TemporaryDirectory() as tmp:
+            Path(tmp, "transcript.json").write_text(json.dumps(self.transcript_json()), encoding="utf-8")
+            os.link(Path(tmp, "transcript.json"), Path(tmp, "alias.json"))
+            code, result, _ = self.merge_cli(tmp, self.diarization(), self.transcript_json(), output=str(Path(tmp, "alias.json")))
+            self.assertEqual((code, result["status"]), (1, "blocked"))
+            self.assertEqual(json.loads(Path(tmp, "transcript.json").read_text(encoding="utf-8")), self.transcript_json())
+
+    def test_rttm_blocks_invalid_input_with_specific_messages(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            code, result, _ = self.merge_cli(tmp, {"segments": "x"}, None, extra=["--format", "rttm"])
+            self.assertEqual(result["errors"], ["Diarization input does not match the /v1/audio/diarize JSON shape"])
+            lone = Path(tmp) / "lone.json"
+            lone.write_text('{"duration": 2.0, "num_speakers": 1, "minutes_charged": 1, '
+                            '"segments": [{"speaker": "\\ud83d", "start": 0, "end": 1}]}', encoding="utf-8")
+            argv_extra = ["--format", "rttm"]
+            import io
+            import sys
+            argv = ["client.py", "merge", "--diarization", str(lone), "--output", str(Path(tmp) / "out.rttm"), *argv_extra]
+            with patch.object(client, "SERVICE", "diarize"), patch.object(sys, "argv", argv), patch("sys.stdout", new_callable=io.StringIO) as out:
+                self.assertEqual(client.main(), 1)
+            self.assertEqual(json.loads(out.getvalue())["errors"], ["Input text is not valid Unicode"])
+
+    def test_a_valid_answer_with_a_lone_surrogate_is_still_saved(self):
+        answer = dict(self.diarization(), segments=[{"speaker": "\ud83d", "start": 1.0, "end": 2.0}])
+        with tempfile.TemporaryDirectory() as tmp, patch.object(client, "SERVICE", "diarize"), \
+                patch.object(client, "resolve_key", return_value="fixture"), patch.object(client, "preflight", return_value={}):
+            args = self.diarize_args(tmp)
+            with patch.object(client, "request", return_value=answer):
+                result = client.execute(args)
+            self.assertEqual(result["status"], "completed")
+            self.assertEqual(json.loads(Path(args.output).read_text(encoding="utf-8")), answer)
+
     def test_merge_cli_is_offline_and_writes_a_hashed_artifact(self):
         with tempfile.TemporaryDirectory() as tmp:
             code, result, output = self.merge_cli(tmp, self.diarization(), self.transcript_json())

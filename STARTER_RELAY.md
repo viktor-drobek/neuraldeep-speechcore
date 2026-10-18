@@ -60,7 +60,8 @@ preflight, one submission, bounded polling where applicable, and artifact save.
 OCR/image input. Uploads require explicit user authorization for the content.
 
 Before any request, `run` also checks where the paid result will go: an
-`--output` that is the input file or a directory, or whose directory (before
+`--output` that is the input file (also through a link or a case alias), a
+name the file system refuses ("Artifact path is not usable"), or a directory, or whose directory (before
 symlinks are resolved) is missing or read-only, blocks before the submission
 ("Artifact path must differ from the input file", "Artifact path is a
 directory", "Artifact directory is missing or not writable"); the directory

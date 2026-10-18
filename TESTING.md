@@ -332,3 +332,15 @@ alphabetical order. The sticky-directory and file-name tests failed first.
 `LC_ALL=C PYTHONUTF8=0`, with no `EncodingWarning` under
 `-X warn_default_encoding`, and on Python 3.10.22 (Docker `python:3.10-slim`,
 non-root, no network).
+
+## Fifth cross-review fixes
+
+Port from neuraldeep-diarization `49688de`. `run` blocks an output name the
+file system refuses (any `lstat` error except `FileNotFoundError`), and the
+`run` and `merge` same-file checks add `os.path.samefile()` for hard links and
+case aliases. `--format rttm` blocks a lone surrogate speaker label with its own
+message, and the diarization artifact is written with ASCII escapes. The new
+shared tests failed first. **115 tests passed** (1 skipped outside a tag build),
+both normally and with `LC_ALL=C PYTHONUTF8=0`, with no `EncodingWarning` under
+`-X warn_default_encoding`, and on Python 3.10.22 (Docker `python:3.10-slim`,
+non-root, no network).
