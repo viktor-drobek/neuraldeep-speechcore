@@ -1379,6 +1379,23 @@ class SafetyTests(unittest.TestCase):
                          [(None, 10.0, 12.0, "one"), (None, 40.0, 41.0, "two")])
         self.assertEqual(merged["unassigned_segments"], 2)
 
+    # Seventh cross-review (2026-10-18).
+    def test_input_file_that_is_the_state_file_is_never_sent(self):
+        for service in ("diarize", "ocr"):
+            with self.subTest(service=service), tempfile.TemporaryDirectory() as tmp, \
+                    patch.object(client, "SERVICE", service), patch.object(client, "resolve_key", return_value="fixture"):
+                args = self.diarize_args(tmp)
+                args.operation = client.OPERATIONS[service][0]
+                args.file = args.state = str(Path(tmp) / "x.json")  # does not exist yet
+                with patch.object(client, "preflight") as pre, patch.object(client, "request") as req, \
+                        patch.object(client, "multipart") as body:
+                    result = client.execute(args)
+                self.assertEqual(result["status"], "blocked")
+                self.assertIn("Input file must differ from the state file", result["errors"][0])
+                pre.assert_not_called()
+                req.assert_not_called()
+                body.assert_not_called()
+
     def test_merge_cli_is_offline_and_writes_a_hashed_artifact(self):
         with tempfile.TemporaryDirectory() as tmp:
             code, result, output = self.merge_cli(tmp, self.diarization(), self.transcript_json())

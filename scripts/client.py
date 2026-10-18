@@ -595,6 +595,8 @@ def execute(args):
         # A case alias of the state file only matches once the state exists.
         if same_file(args.output, args.state):
             raise Blocked("State and artifact paths must differ")
+        if getattr(args, "file", None) and same_file(args.file, args.state):
+            raise Blocked("Input file must differ from the state file")
         if args.command == "run":
             method, url, body, content_type = submission(args)
             state["quota_observed"] = preflight(SERVICE, args.operation, key, units, model=getattr(args, "model", None))

@@ -356,3 +356,13 @@ segments stay separate turns. The new shared tests failed first.
 `LC_ALL=C PYTHONUTF8=0`, with no `EncodingWarning` under
 `-X warn_default_encoding`, and on Python 3.10.22 (Docker `python:3.10-slim`,
 non-root, no network).
+
+## Seventh cross-review fix
+
+Port from neuraldeep-diarization `c10a179`. Once the state exists, `run`
+blocks an input file that is the state file, also through a case alias, before
+any request; before, `--file x --state x` with no `x` sent the helper's own
+state JSON. The new shared test failed first. **119 tests passed** (1 skipped
+outside a tag build), both normally and with `LC_ALL=C PYTHONUTF8=0`, with no
+`EncodingWarning` under `-X warn_default_encoding`, and on Python 3.10.22
+(Docker `python:3.10-slim`, non-root, no network).
