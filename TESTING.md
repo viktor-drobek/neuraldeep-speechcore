@@ -381,7 +381,7 @@ non-root, no network).
 ## Streamed uploads
 
 Port from neuraldeep-diarization `3b918a7`. `multipart()` returns an
-`UploadBody` that `http.client` reads in 64 KB blocks with a normal
+`UploadBody` that `http.client` reads in 8 KB blocks with a normal
 `Content-Length`, so the socket timeout bounds each block, not the whole
 upload, and no copy of the file is held in memory; exactly the checked size is
 sent. The provider documents no chunked or resumable upload, so a broken upload
@@ -391,3 +391,16 @@ with `drain()`. The new shared tests failed first. **124 tests passed**
 (1 skipped outside a tag build), both normally and with `LC_ALL=C PYTHONUTF8=0`,
 with no `EncodingWarning` under `-X warn_default_encoding`, and on Python
 3.10.22 (Docker `python:3.10-slim`, non-root, no network).
+
+## Uploads opened before any request
+
+Port from neuraldeep-diarization `4c7979f`. `multipart()` opens the input with
+`O_NONBLOCK`, takes the size from `fstat()` on the open file and refuses
+anything but a regular file, so an unreadable file, a directory or a FIFO
+blocks before the preflight instead of failing mid-upload as a false
+`reconciliation_required`; `execute()` closes a body that was never sent. The
+docs now say 8 KB blocks, `http.client`'s block size. The new shared
+tests failed first. **126 tests passed** (1 skipped outside a tag build), both
+normally and with `LC_ALL=C PYTHONUTF8=0`, with no `EncodingWarning` under
+`-X warn_default_encoding`, and on Python 3.10.22 (Docker `python:3.10-slim`,
+non-root, no network).

@@ -850,11 +850,17 @@ class SafetyTests(unittest.TestCase):
                 patch.object(client, "resolve_key", return_value="fixture"), \
                 patch.object(client, "preflight", return_value={"units_required": 2}) as pre:
             args = self.diarize_args(tmp)
-            with patch.object(client, "request", return_value=self.diarization()) as req:
+            sent = []
+
+            def send(*a, **kw):  # read the body while it is open, as http.client does
+                sent.append(drain(a[3]))
+                return self.diarization()
+
+            with patch.object(client, "request", side_effect=send) as req:
                 result = client.execute(args)
             self.assertEqual(req.call_count, 1)
-            method, url, key, body, content_type = req.call_args.args
-            body = drain(body)
+            method, url, key, _, content_type = req.call_args.args
+            body = sent[0]
             self.assertEqual((method, url, key), ("POST", client.HUB + "/audio/diarize", "fixture"))
             self.assertTrue(content_type.startswith("multipart/form-data; boundary="))
             self.assertIn(b'name="file"; filename="upload.mp3"', body)
@@ -1512,6 +1518,48 @@ class SafetyTests(unittest.TestCase):
                     self.assertEqual(sent.get_header("Content-length"), str(len(body)))
                     self.assertIsNone(sent.get_header("Transfer-encoding"))
                     self.assertIsNone(body.file)
+
+    # Tenth cross-review (2026-10-18).
+    def test_unreadable_or_irregular_input_blocks_before_any_request(self):
+        cases = ["directory", "fifo"] + (["unreadable"] if os.geteuid() != 0 else [])
+        for case in cases:
+            for service in ("diarize", "ocr"):
+                with self.subTest(case=case, service=service), tempfile.TemporaryDirectory() as tmp, \
+                        patch.object(client, "SERVICE", service), patch.object(client, "resolve_key", return_value="fixture"):
+                    args = self.diarize_args(tmp)
+                    args.operation = client.OPERATIONS[service][0]
+                    if case == "directory":
+                        args.file = tmp
+                    elif case == "fifo":  # opening a FIFO for reading would wait for a writer
+                        args.file = str(Path(tmp) / "pipe")
+                        os.mkfifo(args.file)
+                    else:
+                        Path(args.file).chmod(0)
+                    try:
+                        with patch.object(client, "preflight") as pre, patch.object(client, "request") as req:
+                            result = client.execute(args)
+                    finally:
+                        if case == "unreadable":
+                            Path(args.file).chmod(0o600)
+                    self.assertEqual(result["status"], "blocked")
+                    self.assertIn("Input file", result["errors"][0])
+                    pre.assert_not_called()
+                    req.assert_not_called()
+
+    def test_upload_file_is_closed_when_no_request_is_made(self):
+        bodies = []
+        real = client.multipart
+
+        def keep(*a, **kw):
+            bodies.append(real(*a, **kw))
+            return bodies[-1]
+
+        with tempfile.TemporaryDirectory() as tmp, patch.object(client, "SERVICE", "diarize"), \
+                patch.object(client, "resolve_key", return_value="fixture"), patch.object(client, "multipart", side_effect=keep), \
+                patch.object(client, "preflight", side_effect=client.Blocked("Insufficient or invalid service quota")):
+            result = client.execute(self.diarize_args(tmp))
+        self.assertEqual(result["status"], "blocked")
+        self.assertIsNone(bodies[0][0].file)
 
     def test_merge_cli_is_offline_and_writes_a_hashed_artifact(self):
         with tempfile.TemporaryDirectory() as tmp:

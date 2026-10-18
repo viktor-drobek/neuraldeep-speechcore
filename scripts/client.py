@@ -502,31 +502,30 @@ def job_urls(service, job_id):
 class UploadBody:
     """A multipart body read block by block, the way http.client sends a file.
 
-    No copy of the file is held in memory, and the socket timeout bounds each
-    block rather than the whole upload. Exactly `size` bytes of the file are
-    sent, the size the caller checked; a file that shrinks meanwhile raises.
-    The provider documents no resumable upload, so a broken upload is never
-    continued or resent.
+    http.client reads it 8 KB at a time, so no copy of the file is held in
+    memory and the socket timeout bounds each block rather than the whole
+    upload. The file is opened before any request and exactly `size` bytes of
+    it are sent, the size the caller checked; a file that shrinks meanwhile
+    raises. The provider documents no resumable upload, so a broken upload is
+    never continued or resent.
     """
 
-    BLOCK = 65536
-
-    def __init__(self, head, path, size, tail):
-        self.head, self.path, self.size, self.tail = head, path, size, tail
-        self.stage, self.left, self.file = 0, size, None
+    def __init__(self, head, file, size, tail):
+        self.head, self.file, self.size, self.tail = head, file, size, tail
+        self.stage, self.left = 0, size
 
     def __len__(self):
         return len(self.head) + self.size + len(self.tail)
 
     def read(self, n=-1):
-        n = self.BLOCK if n is None or n < 0 else n
+        n = 8192 if n is None or n < 0 else n  # http.client's block size
         if self.stage == 0:
             self.stage = 1
             return self.head
         if self.stage == 1:
             if self.left:
                 if self.file is None:
-                    self.file = open(self.path, "rb")
+                    raise OSError("Upload body was closed")
                 data = self.file.read(min(n, self.left))
                 if not data:
                     self.close()
@@ -554,8 +553,18 @@ def multipart(path, field, fields):
     for name, value in fields.items():
         parts.append(f'--{boundary}\r\nContent-Disposition: form-data; name="{name}"\r\n\r\n{value}\r\n'.encode())
     parts.append(f'--{boundary}\r\nContent-Disposition: form-data; name="{field}"; filename="upload{suffix}"\r\nContent-Type: application/octet-stream\r\n\r\n'.encode())
-    size = Path(path).stat().st_size
-    body = UploadBody(b"".join(parts), path, size, f"\r\n--{boundary}--\r\n".encode())
+    # Open before any request: an unreadable or irregular input must block, not
+    # fail mid-upload. O_NONBLOCK keeps a FIFO from waiting for a writer.
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
+    except OSError:
+        raise Blocked("Input file cannot be read") from None
+    info = os.fstat(fd)
+    if not stat.S_ISREG(info.st_mode):  # Linux opens a directory read-only, too
+        os.close(fd)
+        raise Blocked("Input file is not a regular file")
+    file = os.fdopen(fd, "rb")
+    body = UploadBody(b"".join(parts), file, info.st_size, f"\r\n--{boundary}--\r\n".encode())
     return body, "multipart/form-data; boundary=" + boundary
 
 
@@ -583,6 +592,7 @@ def submission(args):
     # The size checked here is the size streamed: the body never sends more.
     limit = UPLOAD_LIMITS.get(SERVICE)
     if limit is not None and body.size > limit:
+        body.close()
         raise Blocked(f"Input file is larger than the documented {limit // 1000000} MB limit")
     return "POST", url, body, content_type
 
@@ -647,6 +657,7 @@ def execute(args):
         state = new_state(args.state, args.task_id, SERVICE)
     post_timeout = diarize_timeout(units) if SERVICE == "diarize" and type(units) is int else REQUEST_TIMEOUT
     state["timeouts"] = {"request_seconds": post_timeout, "poll_seconds": args.timeout}
+    body = None
     try:
         # A case alias of the state file only matches once the state exists.
         if same_file(args.output, args.state):
@@ -698,6 +709,9 @@ def execute(args):
         if state["status"] not in {"reconciliation_required", "blocked"}:
             state["status"] = "failed" if isinstance(error, JobError) else "poll_error"
         state["errors"].append(str(error) if isinstance(error, (RequestError, JobError)) else "Local I/O or response schema error")
+    finally:
+        if hasattr(body, "close"):  # an upload opened but never sent
+            body.close()
     state["updated_at"] = now()
     save_state(args.state, state)
     return state

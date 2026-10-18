@@ -60,9 +60,10 @@ preflight, one submission, bounded polling where applicable, and artifact save.
 OCR/image input. Uploads require explicit user authorization for the content.
 
 Every upload is streamed in blocks: the multipart body is read from the file
-64 KB at a time and sent with a normal `Content-Length`, so the socket timeout
+8 KB at a time (http.client's block size) and sent with a normal `Content-Length`, so the socket timeout
 bounds each block rather than the whole file, and no copy of the file is held
-in memory. Exactly the size checked before the request is sent; a file that
+in memory. The input is opened before any request, and anything but a readable
+regular file blocks there. Exactly the size checked is sent; a file that
 shrinks meanwhile fails the request.
 NeuralDeep documents no chunked or resumable upload for any of these endpoints,
 so a broken upload is never continued or resent: it ends like any failed submission.
