@@ -36,4 +36,4 @@ failure with a special case in a caller.
 
 ## This service
 
-New SpeechCore uploads stay blocked until a remaining-quota endpoint is verified. `resume` only attaches to an existing job the user named. A `blocked` result is final: never call SpeechCore directly, hand-write state, or probe undocumented endpoints.
+New SpeechCore uploads stay blocked for a subscription key until a remaining-quota endpoint is verified; a wallet key uploads only up to `--wallet-limit`, the amount the user approved, with `--minutes` as the verified length. `resume` only attaches to an existing job the user named. A `blocked` result is final: never call SpeechCore directly, hand-write state, or probe undocumented endpoints.

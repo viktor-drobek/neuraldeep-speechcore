@@ -67,6 +67,18 @@ class ExampleTests(unittest.TestCase):
             self.assertIn(needle, rules)
         self.assertIn("never bypass", skill.split("---", 2)[1])
 
+    def test_docs_describe_wallet_uploads_and_the_subscription_block(self):
+        root = Path(__file__).parents[1]
+        skill = (root / "SKILL.md").read_text(encoding="utf-8")
+        for needle in ("python3 scripts/client.py run upload --file", "--wallet-limit", "--minutes",
+                       "wallet_approval_required", "subscription key"):
+            self.assertIn(needle, skill)
+        for claim in ("New uploads are blocked", "It does not upload", "Use the existing-job resume flow only",
+                      "In this skill the submission itself stays disabled"):
+            self.assertNotIn(claim, skill)
+        relay = (root / "STARTER_RELAY.md").read_text(encoding="utf-8")
+        self.assertIn("a subscription key is blocked at the guard", relay)
+
 
 if __name__ == "__main__":
     unittest.main()

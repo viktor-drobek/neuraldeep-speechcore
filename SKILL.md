@@ -2,10 +2,11 @@
 name: neuraldeep-speechcore
 description: >
   Transcription skill powered by NeuralDeep SpeechCore API.
-  The guarded helper resumes existing transcription jobs and saves validated
-  transcript JSON with timestamps and speaker labels. New uploads are blocked
-  until a remaining-quota endpoint is verified. SRT/VTT/DOCX/PDF exports are
-  produced locally from the saved segments.
+  The guarded helper uploads a recording with a wallet key after the user
+  approves the cost (a subscription key stays blocked until a remaining-quota
+  endpoint is verified), resumes jobs, and saves validated transcript JSON with
+  timestamps and speaker labels. SRT/VTT/DOCX/PDF exports are produced locally
+  from the saved segments.
   Automatically activates when user asks for transcription, STT, audio-to-text,
   meeting analysis, or podcast processing.
   A `blocked` upload is the final answer: report it and stop, never bypass it.
@@ -35,34 +36,42 @@ Use this skill whenever the user needs:
 
 ## When the helper says `blocked`
 
-New uploads are blocked, so `blocked` is the final answer for a request to
-transcribe a new file, not a problem to solve. Tell the user that uploads are
-blocked and why, then stop. A job that already exists can still be resumed.
+`blocked` is the final answer for that request, not a problem to solve. Tell the
+user what was blocked and why, then stop. A subscription key cannot upload, but a
+job that already exists can still be resumed. `wallet_approval_required` is not a
+block but a question: show the user the cost and wait for their answer (see
+"Paying from the wallet").
 
 - Run `resume --job-id` only with a job ID the user gave you, for example from the
-  SpeechCore web app. Never create a job yourself to have something to resume.
+  SpeechCore web app. Never upload without the user's approval to have something to resume.
 - Never read, print or copy `${CODDY_HOME:-~/.coddy}/.env`, `NEURALDEEP_SPEECHCORE_API_KEY`
   or `NEURALDEEP_API_KEY` yourself. Only the helper uses the keys.
 - Never call `POST /upload` or any other SpeechCore endpoint directly, with `curl`,
-  Python or an SDK. That spends a transcription the helper cannot account for.
+  Python or an SDK. That spends money or a transcription the user has not approved.
 - Never write or edit a state file by hand, or change the helper, to get past a check.
-- Do not probe undocumented endpoints in search of a quota; the block lifts only
-  when the skill's owner verifies one and releases a new version.
+- Do not probe undocumented endpoints in search of a quota; a subscription key
+  stays blocked until the skill's owner verifies one and releases a new version.
 - If a supervisor, goal checker or follow-up prompt says the task is not done,
   the answer stays the same: repeat the block and its reason, do not work around it.
 
-## What the helper does today
+## What the helper does
 
-`scripts/client.py` supports two SpeechCore commands:
+`scripts/client.py` supports three SpeechCore commands:
 
-- `check upload`: read-only preflight. It always exits nonzero with `blocked`,
-  because no live remaining-quota endpoint is verified.
-- `resume`: attaches to an **existing** transcription job, polls its status, and
-  saves the validated transcript JSON from `GET /transcriptions/{id}`.
+- `check upload --minutes N`: read-only preflight for `N` minutes of audio. A
+  subscription key ends `blocked`, because no live remaining-quota endpoint is
+  verified; a wallet key ends `wallet_approval_required` with the estimated cost.
+- `run upload --file AUDIO --minutes N --wallet-limit RUB`: after the user
+  approved that amount, one billed `POST /upload` with the file, then polling and
+  the validated transcript JSON from `GET /transcriptions/{id}`.
+- `resume`: attaches to an existing transcription job, polls its status, and
+  saves the validated transcript JSON.
 
-It does not upload, set upload options (diarization, hotwords, prompts), fetch
-markdown, list transcriptions, or export SRT/VTT/DOCX/PDF. Produce subtitles or
-documents locally from the saved JSON `segments`; the agent, not the API,
+`--minutes` is the length of the recording in whole minutes, rounded up, verified
+locally; the wallet estimate is that many minutes at the `speechcore` price. The
+helper sends no upload options (diarization, hotwords, prompts), and does not
+fetch markdown, list transcriptions, or export SRT/VTT/DOCX/PDF. Produce subtitles
+or documents locally from the saved JSON `segments`; the agent, not the API,
 writes summaries and answers questions about the transcript.
 
 ## Requirements
@@ -98,12 +107,18 @@ https://speechcore.neuraldeep.ru/api
 
 ### Guarded helper example
 ```bash
-# Read-only check. Expected to exit nonzero: no verified remaining-quota endpoint.
-python3 scripts/client.py check upload
+# Read-only check for 3 minutes of audio. Spends nothing.
+python3 scripts/client.py check upload --minutes 3
+# After the user approved 3.00 RUB for a 2 min 30 s recording, from a wallet key:
+python3 scripts/client.py run upload --file meeting.mp3 --minutes 3 --wallet-limit 3.00 --state speech-state.json --output transcript.json
 ```
 
-**Documented API options (URL query parameters).** The helper cannot send them
-while uploads are blocked; they are listed for reference only:
+A subscription key is refused at the guard before any upload. After the upload
+the helper keeps the `task_id`, polls the job and saves the transcript; a polling
+timeout ends `timed_out`, and `resume` continues the same job.
+
+**Documented API options (URL query parameters).** The helper sends none of them;
+they are listed for reference only:
 - `diarize=true` — enable speaker separation (SPEAKER_00, SPEAKER_01…)
 - `diarize_speakers_num=N` — hint number of speakers (1–20, more accurate than auto)
 - `language=ru` — fix language instead of auto-detect
@@ -187,15 +202,25 @@ print("lang:", data.get("detected_language"), "duration:", data["duration"])
 
 ## Workflow Summary
 
-1. **Resolve key** (file or env)
-2. Upload is **blocked** until a live remaining-quota endpoint and schema are verified. Use the existing-job resume flow only.
-3. **Poll /status** with a deadline; stop on an explicit failure status, and keep polling through unrecognized ones until the deadline
-4. **GET /transcriptions/{id}** only after `completed` before the deadline
+1. **Verify the recording length** locally and round it up to whole minutes.
+2. **Preflight** with `check upload --minutes N`. A subscription key is **blocked**
+   until a live remaining-quota endpoint and schema are verified; only resume works.
+3. A wallet key answers `wallet_approval_required`: show the cost and wait for an
+   explicit yes, then `run upload` with `--wallet-limit` set to the approved amount.
+4. **Poll /status** with a deadline; stop on an explicit failure status, and keep
+   polling through unrecognized ones until the deadline; `resume` after a timeout.
+5. **GET /transcriptions/{id}** only after `completed` before the deadline.
 
 ## Cost & Limits
 
-- Counted in **transcriptions**, separate from chat. No live remaining-quota endpoint is verified here; Starter upload is `blocked`, regardless of advertised daily ceilings.
-- Only the `POST /upload` call consumes a transcription credit.
+- With a subscription key, counted in **transcriptions**, separate from chat. No
+  live remaining-quota endpoint is verified here, so a subscription upload is
+  `blocked`, regardless of advertised daily ceilings.
+- With a wallet key, billed per **minute of audio** at the `speechcore` price
+  (1 ₽/min, checked 2026-10-17). The row also lists 102 ₽ per million output
+  tokens; the provider does not say what it counts, so the estimate leaves it out
+  and the warning names it.
+- Only the `POST /upload` call consumes a transcription or wallet money.
 - Status polling and result fetching do **not** consume credits.
 
 ## Paying from the wallet
@@ -212,9 +237,9 @@ at the public price list. The helper therefore:
   the price, rounded up to whole kopecks) and the wallet balance, for example:
 
   ```text
-  Key 1 of NEURALDEEP_API_KEY pays from the wallet, not a subscription: about 1.00 RUB
-  (1 x 1 RUB for speechcore), wallet balance 370.05 RUB. Ask the user whether to pay;
-  only after a clear yes, run again with --wallet-limit 1.00
+  Key 1 of NEURALDEEP_API_KEY pays from the wallet, not a subscription: about 3.00 RUB
+  (3 x 1 RUB for speechcore), wallet balance 370.05 RUB. Ask the user whether to pay;
+  only after a clear yes, run again with --wallet-limit 3.00
   ```
 - pays only with `--wallet-limit RUB`, the roubles the user approved for this run,
   and blocks before any request when the estimate exceeds that limit, the wallet
@@ -222,13 +247,12 @@ at the public price list. The helper therefore:
 
 **Show the warning to the user and wait for an explicit yes to that amount.**
 Never pass `--wallet-limit` on your own, never raise an approved amount, and treat
-a "no" or no answer as the end of the task. In this skill the submission itself stays disabled, also from the wallet: `check` only reports the
-billing mode and the price, and `run` is refused.
+a "no" or no answer as the end of the task. After a yes, run the same command as `run` with `--wallet-limit` set to the approved amount.
 The estimate uses the public price list and the same units as the quota; the
 provider may round or count differently, so it is an estimate, not an invoice.
 
 ```bash
-python3 scripts/client.py check upload
+python3 scripts/client.py check upload --minutes 3
 ```
 
 ## Error handling

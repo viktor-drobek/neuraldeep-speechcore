@@ -8,8 +8,9 @@ in [SKILL.md](SKILL.md); its safety rules are in [STARTER_RELAY.md](STARTER_RELA
 
 - `SKILL.md`: the skill and NeuralDeep SpeechCore API reference.
 - `scripts/client.py`: a standard-library helper with a fail-closed Starter guard
-  and resumable jobs. SpeechCore uploads are **blocked on purpose**: only
-  `check upload` (always `blocked`) and `resume` of an existing job work.
+  and resumable jobs. A subscription key cannot upload (**blocked on purpose**); a
+  wallet key uploads only after the user approves the cost (`--wallet-limit`), and
+  `resume` reads an existing job.
 - `tests/`: offline tests with mocked HTTP. `TESTING.md` records every change and
   the current test count.
 - Python 3.10+ standard library only. No dependencies, no build step.
@@ -44,8 +45,9 @@ CI (`.github/workflows/tests.yml`) runs the suite and `--help` on Python 3.10 an
 - **Fail closed.** No retries or resubmission of a billed POST, no redirects, no
   API key or provider response body in errors or output. An ambiguous submission
   is `reconciliation_required`, not a reason to try again.
-- **Do not unblock SpeechCore or whisper-1 uploads.** They stay blocked until a
-  remaining-quota endpoint is verified; that is the user's decision.
+- **Do not unblock subscription uploads to SpeechCore or transcription.** They stay
+  blocked until a remaining-quota endpoint is verified; that is the user's decision.
+  A wallet key uploads only with the user's approved `--wallet-limit`.
 - **Test first.** Add or change a test, show it fails, then fix. Record the change
   and the new test count in `TESTING.md`.
 - **Keep the shared helper identical.** `scripts/client.py` is shared with

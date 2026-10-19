@@ -1,7 +1,7 @@
 # 🎙️ neuraldeep-speechcore
 
-Resume existing transcription jobs and save validated transcript JSON with timestamps and speaker labels.
-New uploads are blocked until a remaining-quota endpoint is verified; SRT/VTT/DOCX/PDF exports are produced locally from the saved segments.
+Upload a recording with a wallet key after the user approves the cost, resume jobs, and save validated transcript JSON with timestamps and speaker labels.
+A subscription key cannot upload until a remaining-quota endpoint is verified; SRT/VTT/DOCX/PDF exports are produced locally from the saved segments.
 
 A [Coddy](https://coddy.dev) / AI-agent skill for the **NeuralDeep SpeechCore API**.
 
@@ -41,8 +41,9 @@ shapes, and worked examples.
 See [STARTER_RELAY.md](./STARTER_RELAY.md) for guarded commands, private job
 state, timeout recovery, and the optional artifact-based Relay envelope.
 The helper checks live service quota rather than hard-coding daily limits.
-SpeechCore upload is blocked until a remaining-quota endpoint is verified;
-resuming existing jobs remains read-only.
+A subscription upload is blocked until a remaining-quota endpoint is verified; a
+wallet key uploads only up to the amount the user approved (`--wallet-limit`), and
+resuming an existing job is read-only.
 
 Run offline tests: `python3 -B -m unittest discover -s tests`.
 

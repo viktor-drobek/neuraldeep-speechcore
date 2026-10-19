@@ -35,6 +35,8 @@ TRANSCRIPTION_MODELS = ("gigaam-v3", "whisper-1", "whisper-podlodka-turbo")
 DEFAULT_TRANSCRIPTION_MODEL = "gigaam-v3"
 # Services that answer the submission directly, without a provider job to resume.
 SYNCHRONOUS = {"search", "whisper", "diarize"}
+# Services whose quota cost is minutes of audio, given by --minutes.
+MINUTE_SERVICES = {"diarize", "whisper", "speechcore"}
 # Provider limits for /v1/audio/diarize: up to 4 hours and 500 MB per file.
 MAX_DIARIZE_MINUTES = 240
 # Upload size limits the provider documents; the other services document none.
@@ -249,9 +251,11 @@ def guard(service, operation, limits, prices, quota, units, model=None):
         if service == "diarize" and units > MAX_DIARIZE_MINUTES:
             raise Blocked("Audio longer than 4 hours is not accepted")
         if service == "speechcore":
-            raise Blocked("SpeechCore remaining-quota endpoint unverified; uploads disabled")
+            raise Blocked("SpeechCore remaining-quota endpoint unverified; subscription uploads disabled, "
+                          "a wallet key can pay with the user's approval")
         if service == "whisper":
-            raise Blocked(f"{model} remaining-quota endpoint unverified; transcription disabled")
+            raise Blocked(f"{model} remaining-quota endpoint unverified; subscription transcription disabled, "
+                          "a wallet key can pay with the user's approval")
         if quota["tier"] != "starter":
             raise Blocked("Service quota tier differs from Starter")
         if service == "search":
@@ -305,10 +309,7 @@ def wallet_quote(service, operation, limits, prices, units, model=None):
             raise Blocked("Positive integer quota cost required")
         if service == "diarize" and units > MAX_DIARIZE_MINUTES:
             raise Blocked("Audio longer than 4 hours is not accepted")
-        if service == "speechcore":
-            raise Blocked("SpeechCore uploads disabled in this helper, also from the wallet")
-        if service == "whisper":
-            raise Blocked(f"{model} transcription disabled in this helper, also from the wallet")
+        tokens = rows[0].get("out_rub_1m")
         balance = limits["wallet"]["balance_rub"]
         cap = limits["key"]["cap"]
         if not finite(balance) or type(cap["cap_blocked"]) is not bool:
@@ -323,8 +324,12 @@ def wallet_quote(service, operation, limits, prices, units, model=None):
             raise Blocked("The key's spending cap does not cover the estimated cost")
     except (KeyError, TypeError, AttributeError):
         raise Blocked("Unrecognized limits, prices, or wallet schema") from None
-    return {"observed_at": now(), "billing": "wallet", "price_id": target, "units": units,
-            "rate_rub": rate, "estimate_rub": estimate, "balance_rub": balance}
+    observed = {"observed_at": now(), "billing": "wallet", "price_id": target, "units": units,
+                "rate_rub": rate, "estimate_rub": estimate, "balance_rub": balance}
+    if type(tokens) in (int, float) and finite(tokens) and tokens > 0:
+        # The row also prices output tokens; the provider does not say what it counts.
+        observed["token_rate_rub_1m"] = tokens
+    return observed
 
 
 def wallet_warning(observed):
@@ -333,6 +338,8 @@ def wallet_warning(observed):
     return (f"Key {key.get('index')} of {key.get('variable')} pays from the wallet, not a subscription: "
             f"about {observed['estimate_rub']:.2f} RUB ({observed['units']} x {observed['rate_rub']:g} RUB "
             f"for {observed['price_id']}), wallet balance {observed['balance_rub']:.2f} RUB. "
+            + (f"The price row also bills output tokens at {observed['token_rate_rub_1m']:g} RUB per million, "
+               "which the estimate leaves out. " if observed.get("token_rate_rub_1m") else "") +
             f"Ask the user whether to pay; only after a clear yes, run again with "
             f"--wallet-limit {observed['estimate_rub']:.2f}")
 
@@ -503,6 +510,17 @@ def validate_diarization(value):
         if type(value.get(field)) is not int or value[field] < 0:
             raise ValueError()
     check_segments(value.get("segments"), "speaker")
+    return value
+
+
+def validate_transcription(value):
+    """Raise ValueError unless value is a transcription answer: text, and timed segments if any."""
+    if not isinstance(value, dict) or value.get("success") is False or value.get("error"):
+        raise ValueError()
+    if not isinstance(value.get("text"), str):
+        raise ValueError()
+    if "segments" in value:
+        check_segments(value["segments"], "text")
     return value
 
 
@@ -791,14 +809,11 @@ def multipart(path, field, fields):
 
 
 def submission(args):
-    if SERVICE == "speechcore":
-        raise Blocked("SpeechCore uploads disabled until remaining quota is verified")
-    if SERVICE == "whisper":
-        raise Blocked(f"{getattr(args, 'model', None) or DEFAULT_TRANSCRIPTION_MODEL} transcription disabled until remaining quota is verified")
     payload = json.loads(Path(args.payload).read_text(encoding="utf-8")) if args.payload else {}
     if not isinstance(payload, dict):
         raise Blocked("Payload must be a JSON object")
-    url = HUB + "/audio/diarize" if SERVICE == "diarize" else HUB + "/" + SERVICE + "/" + args.operation
+    url = {"diarize": HUB + "/audio/diarize", "whisper": HUB + "/audio/transcriptions",
+           "speechcore": SPEECH + "/upload"}.get(SERVICE, HUB + "/" + SERVICE + "/" + args.operation)
     if SERVICE == "search":
         if args.operation == "tg":
             return "GET", url + "?" + urlencode(payload), None, "application/json"
@@ -808,9 +823,11 @@ def submission(args):
     if not args.file:
         raise Blocked("A local --file is required")
     fields = {"model_profile": args.profile} if SERVICE == "ocr" else {}
+    if SERVICE == "whisper":
+        fields = {"model": getattr(args, "model", None) or DEFAULT_TRANSCRIPTION_MODEL}
     if payload:
         raise Blocked("Extra multipart fields are not supported by this minimal helper")
-    body, content_type = multipart(args.file, "file" if SERVICE in ("ocr", "diarize") else "image", fields)
+    body, content_type = multipart(args.file, "image" if SERVICE == "images" else "file", fields)
     # The size checked here is the size streamed: the body never sends more.
     limit = UPLOAD_LIMITS.get(SERVICE)
     if limit is not None and body.size > limit:
@@ -826,7 +843,7 @@ def execute(args):
     units = 1
     if SERVICE == "ocr":
         units = args.pages * (2 if args.profile == "pro" else 1)
-    elif SERVICE == "diarize":
+    elif SERVICE in MINUTE_SERVICES:
         units = getattr(args, "minutes", 0)
     if args.command == "check":
         try:
@@ -896,7 +913,8 @@ def execute(args):
         key = resume_key(state, variable, keys)
     else:
         state = new_state(args.state, args.task_id, SERVICE)
-    post_timeout = diarize_timeout(units) if SERVICE == "diarize" and type(units) is int else REQUEST_TIMEOUT
+    # A synchronous audio answer arrives on the POST itself, so it waits longer.
+    post_timeout = diarize_timeout(units) if SERVICE in ("diarize", "whisper") and type(units) is int else REQUEST_TIMEOUT
     state["timeouts"] = {"request_seconds": post_timeout, "poll_seconds": args.timeout}
     body = None
     try:
@@ -927,6 +945,13 @@ def execute(args):
                 except (ValueError, TypeError):
                     raise JobError("Unrecognized diarization response") from None
                 # ASCII escapes keep even a lone surrogate in a paid answer writable.
+                data = json.dumps(response, indent=2).encode()
+                result_url = url
+            elif SERVICE == "whisper":
+                try:
+                    validate_transcription(response)
+                except (ValueError, TypeError):
+                    raise JobError("Unrecognized transcription response") from None
                 data = json.dumps(response, indent=2).encode()
                 result_url = url
             else:
@@ -973,7 +998,7 @@ def main():
     parser.add_argument("--pages", type=int, default=0, help="Verified OCR input page count; required before upload")
     parser.add_argument("--profile", choices=("fast", "pro"), default="fast")
     parser.add_argument("--model", choices=TRANSCRIPTION_MODELS, help="Transcription model (default gigaam-v3)")
-    parser.add_argument("--minutes", type=int, default=0, help="Verified audio duration in whole minutes, rounded up; required before diarization")
+    parser.add_argument("--minutes", type=int, default=0, help="Verified audio duration in whole minutes, rounded up; required for audio services")
     parser.add_argument("--diarization", help="merge: diarization JSON from /v1/audio/diarize")
     parser.add_argument("--transcript", help="merge: transcript JSON with timed text segments")
     parser.add_argument("--format", choices=MERGE_FORMATS, help="merge output: json (default), vtt, srt, or rttm from the diarization alone")
@@ -990,8 +1015,10 @@ def main():
         parser.error("--timeout must be finite and positive")
     if args.model and SERVICE != "whisper":
         parser.error("--model applies only to transcription")
-    if (args.minutes or args.command == "merge") and SERVICE != "diarize":
-        parser.error("--minutes and merge apply only to diarization")
+    if args.minutes and SERVICE not in MINUTE_SERVICES:
+        parser.error("--minutes applies only to minute-billed services")
+    if args.command == "merge" and SERVICE != "diarize":
+        parser.error("merge applies only to diarization")
     if args.command != "merge" and (args.diarization or args.transcript or args.format):
         parser.error("--diarization, --transcript and --format apply only to merge")
     args.format = args.format or "json"

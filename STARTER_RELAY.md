@@ -2,6 +2,10 @@
 
 ## Before spending
 
+In this repository a subscription key is blocked at the guard for uploads, because
+no SpeechCore remaining-quota endpoint is verified; a wallet key uploads only up to
+the amount the user approved, and `resume` reads an existing job.
+
 The helper spends from a Starter subscription, or from the wallet only up to an
 amount the user approved (`--wallet-limit`, see SKILL.md, "Paying from the wallet").
 For a subscription key every
@@ -38,7 +42,7 @@ No credentials, account snapshots, or live remaining values are test fixtures.
 | Search | `/v1/search/quota`: `tier`; `search` and `crawl` each have `mode: tier`, `day.remaining`, `month.remaining` | `search:web`, `search:tg`, `search:crawl` |
 | OCR | `/v1/ocr/balance`: `tier`, `daily_pages.remaining`, `monthly_pages.remaining` | `ocr:extract` |
 | Images | `/v1/images/quota`: `tier`, `img.day.remaining`, `img.month.remaining` | `image:generate`, `image:upscale`, `image:background_remove`, `image:enhance`, `image:avatar` |
-| SpeechCore | **Unverified: uploads blocked.** The reference does not identify a live remaining-quota endpoint. | `speechcore` (non-premium alone is insufficient) |
+| SpeechCore | **Unverified: subscription uploads blocked.** The reference does not identify a live remaining-quota endpoint; a wallet key can pay with the user's approval. | `speechcore` (non-premium alone is insufficient) |
 | Diarization | `/v1/audio/diarize/quota`: `unit: minute`, `tier`, `day` and `month` each with `used` and `limit`; there is no `remaining` field, so the helper uses `limit - used` (verified read-only on 2026-10-18) | `audio:diarize` (`billing: unit`) |
 
 OCR requires a locally verified input page count through `--pages`. `fast`
@@ -50,8 +54,8 @@ wallet-affordable count for the daily and monthly subscription buckets.
 Image generation and processing POSTs return `{task_uid}`, not PNG bytes.
 All operations use `/v1/images/tasks/{uid}` until `finished`, then the binary
 `/result` endpoint. OCR uses `{id}` and `completed`; SpeechCore's documented
-`{task_id}` uses `completed`, but this helper only resumes existing SpeechCore
-jobs. Advertised daily ceilings are not a live budget and cannot unblock uploads.
+`{task_id}` uses `completed`; this helper uploads to SpeechCore only from an
+approved wallet key. Advertised daily ceilings are not a live budget and cannot unblock uploads.
 
 ## Run and recover
 

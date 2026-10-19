@@ -136,7 +136,7 @@ class SafetyTests(unittest.TestCase):
         price = {"prices": [{"model": "gigaam-v3", "premium": False}]}
         with patch.object(client, "SERVICE", "whisper"), patch.object(client, "resolve_keys", return_value=("NEURALDEEP_API_KEY", ["fixture"])), \
                 patch.object(client, "request", side_effect=[limits(), price]), \
-                patch.object(sys, "argv", ["client.py", "check"]), patch("sys.stdout", new_callable=io.StringIO) as out:
+                patch.object(sys, "argv", ["client.py", "check", "--minutes", "1"]), patch("sys.stdout", new_callable=io.StringIO) as out:
             self.assertEqual(client.main(), 1)
         self.assertIn("gigaam-v3 remaining-quota endpoint unverified", json.loads(out.getvalue())["errors"][0])
 
@@ -154,17 +154,19 @@ class SafetyTests(unittest.TestCase):
         price = {"prices": [{"model": "gigaam-v3", "premium": False}]}
         with patch.object(client, "SERVICE", "whisper"), patch.object(client, "resolve_keys", return_value=("NEURALDEEP_API_KEY", ["fixture"])), \
                 patch.object(client, "request", side_effect=[limits(), price]) as req, \
-                patch.object(sys, "argv", ["client.py", "check", "--model", "gigaam-v3"]), patch("sys.stdout", new_callable=io.StringIO) as out:
+                patch.object(sys, "argv", ["client.py", "check", "--model", "gigaam-v3", "--minutes", "1"]), patch("sys.stdout", new_callable=io.StringIO) as out:
             self.assertEqual(client.main(), 1)
         self.assertIn("gigaam-v3 remaining-quota endpoint unverified", json.loads(out.getvalue())["errors"][0])
         self.assertEqual([c.args[:2] for c in req.call_args_list], [("GET", client.HUB + "/limits"), ("GET", client.PRICES)])
+        podlodka = {"prices": [{"model": "whisper-podlodka-turbo", "premium": False}]}
         with tempfile.TemporaryDirectory() as tmp, patch.object(client, "SERVICE", "whisper"), patch.object(client, "resolve_keys", return_value=("NEURALDEEP_API_KEY", ["fixture"])), \
-                patch.object(client, "request") as req, patch("sys.stdout", new_callable=io.StringIO) as out, \
-                patch.object(sys, "argv", ["client.py", "run", "--model", "whisper-podlodka-turbo", "--file", str(Path(tmp) / "a.wav"),
+                patch.object(client, "request", side_effect=[limits(), podlodka]) as req, patch("sys.stdout", new_callable=io.StringIO) as out, \
+                patch.object(sys, "argv", ["client.py", "run", "--model", "whisper-podlodka-turbo", "--file", str(Path(tmp) / "a.wav"), "--minutes", "1",
                                            "--state", str(Path(tmp) / "s.json"), "--output", str(Path(tmp) / "t.json")]):
+            Path(tmp, "a.wav").write_bytes(b"RIFF")
             self.assertEqual(client.main(), 1)
-        self.assertIn("whisper-podlodka-turbo transcription disabled", json.loads(out.getvalue())["errors"][0])
-        req.assert_not_called()
+        self.assertIn("whisper-podlodka-turbo remaining-quota endpoint unverified", json.loads(out.getvalue())["errors"][0])
+        self.assertNotIn("POST", [c.args[0] for c in req.call_args_list])
 
     def test_model_flag_is_refused_outside_transcription_and_for_unknown_models(self):
         import io
@@ -800,22 +802,23 @@ class SafetyTests(unittest.TestCase):
             self.assertFalse(state.exists())
             req.assert_not_called()
 
-    def test_whisper_run_is_blocked_before_any_request(self):
+    def test_subscription_transcription_is_blocked_before_any_post(self):
         import io
         import sys
+        price = {"prices": [{"model": "gigaam-v3", "premium": False}]}
         with tempfile.TemporaryDirectory() as tmp, patch.object(client, "SERVICE", "whisper"), patch.object(client, "resolve_keys", return_value=("NEURALDEEP_API_KEY", ["fixture"])):
             output = Path(tmp) / "result.json"
-            argv = ["client.py", "run", "transcribe", "--file", str(Path(tmp) / "missing.wav"),
+            Path(tmp, "a.wav").write_bytes(b"RIFF")
+            argv = ["client.py", "run", "transcribe", "--file", str(Path(tmp) / "a.wav"), "--minutes", "1",
                     "--state", str(Path(tmp) / "state.json"), "--output", str(output)]
-            with patch.object(client, "request") as req, patch.object(client, "multipart") as body, patch.object(sys, "argv", argv), patch("sys.stdout", new_callable=io.StringIO) as out:
+            with patch.object(client, "request", side_effect=[limits(), price]) as req, patch.object(sys, "argv", argv), patch("sys.stdout", new_callable=io.StringIO) as out:
                 self.assertEqual(client.main(), 1)
             result = json.loads(out.getvalue())
             self.assertEqual(result["status"], "blocked")
-            self.assertIn("gigaam-v3 transcription disabled until remaining quota is verified", result["errors"][0])
+            self.assertIn("gigaam-v3 remaining-quota endpoint unverified", result["errors"][0])
+            self.assertIn("wallet", result["errors"][0])
             self.assertFalse(output.exists())
-            req.assert_not_called()
-            body.assert_not_called()
-
+            self.assertNotIn("POST", [c.args[0] for c in req.call_args_list])
 
     # Speaker diarization (/v1/audio/diarize), verified read-only on 2026-10-18:
     # the quota reports used and limit minutes per window, not a remaining count.
@@ -982,7 +985,7 @@ class SafetyTests(unittest.TestCase):
     def test_minutes_flag_and_merge_are_diarization_only(self):
         import io
         import sys
-        cases = [("search", ["check", "web", "--minutes", "3"]), ("whisper", ["check", "--minutes", "3"]),
+        cases = [("search", ["check", "web", "--minutes", "3"]), ("ocr", ["check", "--minutes", "3"]),
                  ("ocr", ["merge", "--diarization", "d.json", "--transcript", "t.json"]),
                  ("diarize", ["merge", "--diarization", "d.json"]),
                  ("diarize", ["check", "--transcript", "t.json"])]
@@ -1845,15 +1848,88 @@ class SafetyTests(unittest.TestCase):
         self.assertEqual(result["quota_observed"]["billing"], "subscription")
         self.assertEqual(result["quota_observed"]["key"]["index"], 2)
 
-    def test_the_wallet_does_not_unblock_disabled_services(self):
-        for service, price, reason in (("whisper", "gigaam-v3", "transcription disabled"),
-                                       ("speechcore", "speechcore", "uploads disabled")):
-            prices = {"prices": [{"model": price, "billing": "minute", "rub_per_min": 1.0, "premium": False}]}
-            with self.subTest(service=service):
-                code, result, _ = self.cli(["check", "--wallet-limit", "5"], [self.wallet_limits(), prices],
-                                           ("NEURALDEEP_API_KEY", ["wallet-secret"]), service)
+    def transcription_answer(self):
+        return {"text": "Привет. Hello.", "language": "ru", "duration": 3.0,
+                "segments": [{"start": 0.0, "end": 1.5, "text": "Привет."}, {"start": 1.5, "end": 3.0, "text": "Hello."}]}
+
+    def audio_args(self, tmp, command, service_op):
+        audio = Path(tmp) / "talk.wav"
+        audio.write_bytes(b"RIFF audio fixture")
+        return [command, service_op, "--file", str(audio), "--minutes", "3", "--state", str(Path(tmp) / "state.json"),
+                "--output", str(Path(tmp) / "result.json")]
+
+    def test_the_wallet_pays_for_transcription_with_approval(self):
+        rows = {"prices": [{"model": "whisper-1", "billing": "minute", "rub_per_min": 1.0, "out_rub_1m": 102.0, "premium": False}]}
+        keys = ("NEURALDEEP_TRANSCRIPTIONS_API_KEY", ["wallet-secret"])
+        code, result, req = self.cli(["check", "--model", "whisper-1", "--minutes", "3"], [self.wallet_limits(), rows], keys, "whisper")
+        self.assertEqual((code, result["status"]), (1, "wallet_approval_required"))
+        self.assertEqual(result["quota_observed"]["estimate_rub"], 3.0)
+        self.assertIn("output tokens", result["errors"][0])  # the row also prices tokens the estimate leaves out
+        with tempfile.TemporaryDirectory() as tmp:
+            argv = self.audio_args(tmp, "run", "transcribe") + ["--model", "whisper-1", "--wallet-limit", "3"]
+            sent = []
+
+            def respond(*a, **kw):
+                if a[0] == "POST":
+                    sent.append((a[1], drain(a[3]), kw.get("timeout")))
+                    return self.transcription_answer()
+                return answers.pop(0)
+            answers = [self.wallet_limits(), rows]
+            with patch.object(client, "SERVICE", "whisper"), patch.object(client, "resolve_keys", return_value=keys), \
+                    patch.object(client, "request", side_effect=respond):
+                import io
+                import sys
+                with patch.object(sys, "argv", ["client.py", *argv]), patch("sys.stdout", new_callable=io.StringIO) as out:
+                    self.assertEqual(client.main(), 0)
+            saved = json.loads(Path(tmp, "result.json").read_text(encoding="utf-8"))
+        result = json.loads(out.getvalue())
+        self.assertEqual(result["status"], "completed")
+        url, body, timeout = sent[0]
+        self.assertEqual((url, timeout), (client.HUB + "/audio/transcriptions", 120))
+        self.assertIn(b'name="model"\r\n\r\nwhisper-1\r\n', body)
+        self.assertIn(b'name="file"; filename="upload.wav"', body)
+        self.assertEqual(saved, self.transcription_answer())
+
+    def test_an_unrecognized_transcription_answer_needs_reconciliation(self):
+        rows = {"prices": [{"model": "gigaam-v3", "billing": "minute", "rub_per_min": 0.25, "premium": False}]}
+        for answer in ({}, {"text": None}, {"text": "x", "segments": [{"start": 2, "end": 1, "text": "x"}]}, {"text": "x", "error": "busy"}, []):
+            with self.subTest(answer=answer), tempfile.TemporaryDirectory() as tmp:
+                code, result, req = self.cli(self.audio_args(tmp, "run", "transcribe") + ["--wallet-limit", "1"],
+                                             [self.wallet_limits(), rows, answer], ("NEURALDEEP_API_KEY", ["wallet-secret"]), "whisper")
+                self.assertEqual((code, result["status"]), (1, "reconciliation_required"))
+                self.assertIn("transcription", result["errors"][0].lower())
+                self.assertFalse(Path(tmp, "result.json").exists())
+
+    def test_the_wallet_pays_for_a_speechcore_upload_and_polls_the_job(self):
+        rows = {"prices": [{"model": "speechcore", "billing": "minute", "rub_per_min": 1.0, "premium": False}]}
+        transcript = json.dumps({"duration": 3.0, "segments": [{"start": 0.0, "end": 3.0, "text": "Hi"}]}).encode()
+        with tempfile.TemporaryDirectory() as tmp:
+            code, result, req = self.cli(self.audio_args(tmp, "run", "upload") + ["--wallet-limit", "3"],
+                                         [self.wallet_limits(), rows, {"task_id": "job-fixture"}, {"status": "completed"},
+                                          (transcript, "application/json")],
+                                         ("NEURALDEEP_SPEECHCORE_API_KEY", ["wallet-secret"]), "speechcore")
+            self.assertEqual(Path(tmp, "result.json").read_bytes(), transcript)
+        self.assertEqual((code, result["status"], result["provider_job_id"]), (0, "completed", "job-fixture"))
+        self.assertEqual([c.args[:2] for c in req.call_args_list][2:], [
+            ("POST", client.SPEECH + "/upload"), ("GET", client.SPEECH + "/transcriptions/job-fixture/status"),
+            ("GET", client.SPEECH + "/transcriptions/job-fixture")])
+        self.assertEqual(result["quota_observed"]["estimate_rub"], 3.0)
+
+    def test_subscription_keys_still_cannot_upload_to_speechcore_or_transcribe(self):
+        for service, op, price in (("whisper", "transcribe", "gigaam-v3"), ("speechcore", "upload", "speechcore")):
+            prices = {"prices": [{"model": price, "premium": False}]}
+            with self.subTest(service=service), tempfile.TemporaryDirectory() as tmp:
+                code, result, req = self.cli(self.audio_args(tmp, "run", op), [limits(), prices],
+                                             ("NEURALDEEP_API_KEY", ["subscription-secret"]), service)
                 self.assertEqual((code, result["status"]), (1, "blocked"))
-                self.assertIn(reason, result["errors"][0])
+                self.assertIn("remaining-quota endpoint unverified", result["errors"][0])
+                self.assertNotIn("POST", [c.args[0] for c in req.call_args_list])
+
+    def test_minute_billed_services_need_minutes(self):
+        rows = {"prices": [{"model": "speechcore", "billing": "minute", "rub_per_min": 1.0, "premium": False}]}
+        code, result, _ = self.cli(["check"], [self.wallet_limits(), rows], ("NEURALDEEP_API_KEY", ["wallet-secret"]), "speechcore")
+        self.assertEqual((code, result["status"]), (1, "blocked"))
+        self.assertIn("Positive integer", result["errors"][0])
 
     def test_wallet_estimates_follow_the_quota_units_and_price_kind(self):
         ocr = {"prices": [{"model": "ocr:extract", "billing": "unit", "unit_rub": 1.0, "premium": False}]}
