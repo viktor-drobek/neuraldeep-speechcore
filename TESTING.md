@@ -510,3 +510,16 @@ first. **151 tests passed** (1 skipped outside a tag build), both normally and
 with `LC_ALL=C PYTHONUTF8=0`, with no `EncodingWarning` under
 `-X warn_default_encoding`, and on Python 3.10.22 (Docker `python:3.10-slim`,
 non-root, no network).
+
+## Release metadata (v2.0.0)
+
+`metadata.version` is now 2.0.0, a major release under semantic versioning,
+because the key source changed incompatibly: the helper no longer reads the
+Coddy provider file `providers/neuraldeep/neuraldeep-auth.json`, only this
+skill's own variable and the shared `NEURALDEEP_API_KEY` from the environment or
+`${CODDY_HOME:-~/.coddy}/.env`; a key kept only in the provider file must be
+added to `.env`. The other changes since v1.0.0 add features: the diarize
+service and its formats, streamed uploads with documented size limits,
+explained API errors, wallet billing with the user's approval, and wallet-paid
+transcription and SpeechCore uploads. `tests/test_release.py` passes; the tag
+check runs on the `v2.0.0` tag build after the merge.
