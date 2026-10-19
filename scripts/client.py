@@ -61,6 +61,14 @@ class Blocked(RuntimeError):
     pass
 
 
+class WalletApproval(Blocked):
+    """A wallet key could pay, but only the user may approve spending money."""
+
+    def __init__(self, message, observed):
+        super().__init__(message)
+        self.observed = observed
+
+
 class RequestError(RuntimeError):
     pass
 
@@ -226,9 +234,13 @@ def guard(service, operation, limits, prices, quota, units, model=None):
             model = model or DEFAULT_TRANSCRIPTION_MODEL
             if model not in TRANSCRIPTION_MODELS:
                 raise Blocked("Unsupported transcription model")
-        if (limits["key"]["billing_mode"] != "subscription" or
-                limits["key"]["status"] != "ok" or limits["tier"] != "starter"):
-            raise Blocked("Requires an ok key with Starter subscription billing")
+        # Fixed texts name the failing condition; a wallet key never reaches this guard.
+        if limits["key"]["billing_mode"] != "subscription":
+            raise Blocked("Key billing mode is neither subscription nor wallet")
+        if limits["key"]["status"] != "ok":
+            raise Blocked("Requires an ok key")
+        if limits["tier"] != "starter":
+            raise Blocked("Requires the Starter tier for subscription billing")
         rows = [p for p in prices["prices"] if p["model"] == price_id(service, operation, model)]
         if len(rows) != 1 or rows[0].get("premium") is not False:
             raise Blocked("Operation is not explicitly non-premium in public prices")
@@ -265,25 +277,91 @@ def guard(service, operation, limits, prices, quota, units, model=None):
         raise Blocked("Unrecognized limits, prices, or service quota schema") from None
 
 
+def wallet_quote(service, operation, limits, prices, units, model=None):
+    """What a wallet key would pay: units times the public price, checked against
+    the wallet balance and the key's own spending cap. Raises Blocked otherwise.
+
+    In wallet mode the subscription does not apply (llms-full.txt, "Цены и
+    тарификация"), so no service quota is read. The estimate uses the same units
+    as the subscription quota (minutes, pages counted twice for pro, operations).
+    """
+    try:
+        if operation not in OPERATIONS[service]:
+            raise Blocked("Unsupported operation")
+        if service == "whisper":
+            model = model or DEFAULT_TRANSCRIPTION_MODEL
+            if model not in TRANSCRIPTION_MODELS:
+                raise Blocked("Unsupported transcription model")
+        if limits["key"]["status"] != "ok":
+            raise Blocked("Requires an ok key")
+        target = price_id(service, operation, model)
+        rows = [p for p in prices["prices"] if p["model"] == target]
+        if len(rows) != 1:
+            raise Blocked("Operation has no single public price row")
+        rate = rows[0].get({"unit": "unit_rub", "minute": "rub_per_min"}.get(rows[0].get("billing"), ""))
+        if type(rate) not in (int, float) or not finite(rate) or rate < 0:
+            raise Blocked("Operation has no usable public price for the wallet")
+        if type(units) is not int or units <= 0:
+            raise Blocked("Positive integer quota cost required")
+        if service == "diarize" and units > MAX_DIARIZE_MINUTES:
+            raise Blocked("Audio longer than 4 hours is not accepted")
+        if service == "speechcore":
+            raise Blocked("SpeechCore uploads disabled in this helper, also from the wallet")
+        if service == "whisper":
+            raise Blocked(f"{model} transcription disabled in this helper, also from the wallet")
+        balance = limits["wallet"]["balance_rub"]
+        cap = limits["key"]["cap"]
+        if not finite(balance) or type(cap["cap_blocked"]) is not bool:
+            raise TypeError()
+        estimate = math.ceil(round(units * rate * 100, 6)) / 100  # whole kopecks, rounded up
+        if estimate > balance:
+            raise Blocked(f"Wallet balance {balance:.2f} RUB is below the estimated {estimate:.2f} RUB")
+        spend_cap, spent = cap["spend_cap_rub"], cap["spent_rub"]
+        if not finite(spend_cap) or not finite(spent):
+            raise TypeError()
+        if cap["cap_blocked"] or (spend_cap > 0 and spent + estimate > spend_cap):
+            raise Blocked("The key's spending cap does not cover the estimated cost")
+    except (KeyError, TypeError, AttributeError):
+        raise Blocked("Unrecognized limits, prices, or wallet schema") from None
+    return {"observed_at": now(), "billing": "wallet", "price_id": target, "units": units,
+            "rate_rub": rate, "estimate_rub": estimate, "balance_rub": balance}
+
+
+def wallet_warning(observed):
+    """The text the agent shows the user before any money is spent."""
+    key = observed.get("key", {})
+    return (f"Key {key.get('index')} of {key.get('variable')} pays from the wallet, not a subscription: "
+            f"about {observed['estimate_rub']:.2f} RUB ({observed['units']} x {observed['rate_rub']:g} RUB "
+            f"for {observed['price_id']}), wallet balance {observed['balance_rub']:.2f} RUB. "
+            f"Ask the user whether to pay; only after a clear yes, run again with "
+            f"--wallet-limit {observed['estimate_rub']:.2f}")
+
+
 def preflight(service, operation, key, units, model=None):
     limits = request("GET", HUB + "/limits", key)
     prices = request("GET", PRICES, key)
+    mode = limits.get("key", {}).get("billing_mode") if isinstance(limits, dict) and isinstance(limits.get("key"), dict) else None
+    if mode == "wallet":
+        return wallet_quote(service, operation, limits, prices, units, model=model)
     quota = request("GET", HUB + QUOTAS[service], key) if service in QUOTAS else {}
     guard(service, operation, limits, prices, quota, units, model=model)
     # Persist only relevant quota fields, never the account-wide limits response.
     fields = {"search": ("search", "crawl"), "ocr": ("daily_pages", "monthly_pages"), "images": ("img",),
               "diarize": ("unit", "day", "month")}
-    return {"observed_at": now(), "endpoint": HUB + QUOTAS[service],
+    return {"observed_at": now(), "billing": "subscription", "endpoint": HUB + QUOTAS[service],
             "units_required": units, "buckets": {k: quota[k] for k in fields[service]}}
 
 
-def choose_key(variable, keys, operation, units, model=None):
-    """The first key whose free preflight passes, with its quota observation.
+def choose_key(variable, keys, operation, units, model=None, wallet_limit=None):
+    """The first subscription key whose free preflight passes, else a wallet key
+    the user approved, with its observation.
 
-    The observation names the key by variable and number, never by value, so a
-    resume can find the key that submitted the job.
+    A wallet key spends money, so it is used only when no subscription key fits
+    and only up to `wallet_limit` roubles, the amount the user approved; without
+    one it raises WalletApproval with the estimate. The observation names the
+    key by variable and number, never by value, so a resume finds it again.
     """
-    reasons = []
+    reasons, wallet = [], None
     for index, key in enumerate(keys, 1):
         try:
             observed = preflight(SERVICE, operation, key, units, model=model)
@@ -291,6 +369,19 @@ def choose_key(variable, keys, operation, units, model=None):
             reasons.append(str(error))
             continue
         observed["key"] = {"variable": variable, "index": index}
+        if observed.get("billing") == "wallet":
+            wallet = wallet or (key, observed)
+            reasons.append("pays from the wallet")
+            continue
+        return key, observed
+    if wallet is not None:
+        key, observed = wallet
+        if wallet_limit is None:
+            raise WalletApproval(wallet_warning(observed), observed)
+        if observed["estimate_rub"] > wallet_limit:
+            raise Blocked(f"The estimated {observed['estimate_rub']:.2f} RUB exceeds the approved "
+                          f"{wallet_limit:.2f} RUB; ask the user again before paying more")
+        observed["approved_limit_rub"] = wallet_limit
         return key, observed
     if len(reasons) == 1:
         raise Blocked(reasons[0])
@@ -738,7 +829,11 @@ def execute(args):
     elif SERVICE == "diarize":
         units = getattr(args, "minutes", 0)
     if args.command == "check":
-        _, observed = choose_key(variable, keys, args.operation, units, model=getattr(args, "model", None))
+        try:
+            _, observed = choose_key(variable, keys, args.operation, units, model=getattr(args, "model", None),
+                                     wallet_limit=getattr(args, "wallet_limit", None))
+        except WalletApproval as approval:
+            return {"status": "wallet_approval_required", "quota_observed": approval.observed, "errors": [str(approval)]}
         return {"status": "ready", "quota_observed": observed}
     if Path(args.state).resolve() == Path(args.output).resolve():
         raise Blocked("State and artifact paths must differ")
@@ -812,7 +907,8 @@ def execute(args):
             raise Blocked("Input file must differ from the state file")
         if args.command == "run":
             method, url, body, content_type = submission(args)
-            key, state["quota_observed"] = choose_key(variable, keys, args.operation, units, model=getattr(args, "model", None))
+            key, state["quota_observed"] = choose_key(variable, keys, args.operation, units, model=getattr(args, "model", None),
+                                                      wallet_limit=getattr(args, "wallet_limit", None))
             # An interruption from here until an ID is persisted requires reconciliation.
             state["status"] = "reconciliation_required"
             save_state(args.state, state)
@@ -845,6 +941,11 @@ def execute(args):
             data = validate_result(SERVICE, data)
         state["artifacts"] = [save_artifact(args.output, data, result_url)]
         state["status"] = "completed"
+    except WalletApproval as approval:
+        # Nothing was sent; the user decides about the wallet, then a new run with --wallet-limit.
+        state["status"] = "wallet_approval_required"
+        state["quota_observed"] = approval.observed
+        state["errors"].append(str(approval))
     except Blocked as error:
         state["status"] = "blocked"
         state["errors"].append(str(error))
@@ -881,7 +982,10 @@ def main():
     parser.add_argument("--task-id", default="standalone")
     parser.add_argument("--job-id", help="Attach an existing provider job for read-only resume")
     parser.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT, help="Polling deadline in seconds")
+    parser.add_argument("--wallet-limit", type=float, help="Roubles the user approved for paying this run from the wallet")
     args = parser.parse_args()
+    if args.wallet_limit is not None and (not math.isfinite(args.wallet_limit) or args.wallet_limit <= 0):
+        parser.error("--wallet-limit must be a finite positive number of roubles")
     if not math.isfinite(args.timeout) or args.timeout <= 0:
         parser.error("--timeout must be finite and positive")
     if args.model and SERVICE != "whisper":

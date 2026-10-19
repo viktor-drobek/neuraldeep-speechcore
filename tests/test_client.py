@@ -1768,6 +1768,136 @@ class SafetyTests(unittest.TestCase):
             with patch.object(client, "request", return_value=self.diarization()):
                 self.assertEqual(client.execute(args)["status"], "completed")
 
+    # Wallet billing (2026-10-19): only with the user's approval, as a rouble limit.
+    def wallet_limits(self, balance=100.0, status="ok", cap=0.0, spent=0.0, cap_blocked=False):
+        return {"tier": "starter", "key": {"status": status, "billing_mode": "wallet",
+                                           "cap": {"spend_cap_rub": cap, "spent_rub": spent, "cap_blocked": cap_blocked}},
+                "wallet": {"balance_rub": balance, "spent_rub_30d": 0.0}}
+
+    def diarize_prices(self, rate=0.3, premium=False):
+        return {"prices": [{"model": "audio:diarize", "billing": "unit", "unit_rub": rate, "premium": premium}]}
+
+    def cli(self, argv, responses, keys=("NEURALDEEP_DIARIZATION_API_KEY", ["wallet-secret"]), service="diarize"):
+        import io
+        import sys
+        with patch.object(client, "SERVICE", service), patch.object(client, "resolve_keys", return_value=keys), \
+                patch.object(client, "request", side_effect=responses) as req, \
+                patch.object(sys, "argv", ["client.py", *argv]), patch("sys.stdout", new_callable=io.StringIO) as out:
+            code = client.main()
+        self.assertNotIn("secret", out.getvalue())
+        return code, json.loads(out.getvalue()), req
+
+    def test_a_wallet_key_asks_for_approval_with_a_cost_estimate(self):
+        code, result, req = self.cli(["check", "--minutes", "2"], [self.wallet_limits(), self.diarize_prices()])
+        self.assertEqual((code, result["status"]), (1, "wallet_approval_required"))
+        observed = result["quota_observed"]
+        for field, value in (("billing", "wallet"), ("price_id", "audio:diarize"), ("units", 2), ("rate_rub", 0.3),
+                             ("estimate_rub", 0.6), ("balance_rub", 100.0)):
+            self.assertEqual(observed[field], value)
+        self.assertEqual(observed["key"], {"variable": "NEURALDEEP_DIARIZATION_API_KEY", "index": 1})
+        for needle in ("pays from the wallet", "0.60", "100.00", "Ask the user", "--wallet-limit 0.60"):
+            self.assertIn(needle, result["errors"][0])
+        # No subscription quota is read for a wallet key.
+        self.assertEqual([c.args[1] for c in req.call_args_list], [client.HUB + "/limits", client.PRICES])
+
+    def test_an_approved_wallet_limit_lets_the_run_pay(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            args = self.diarize_args(tmp)
+            argv = ["run", "diarize", "--file", args.file, "--minutes", "2", "--wallet-limit", "1",
+                    "--state", args.state, "--output", args.output]
+            code, result, req = self.cli(argv, [self.wallet_limits(), self.diarize_prices(), self.diarization()])
+            saved = json.loads(Path(args.state).read_text(encoding="utf-8"))
+        self.assertEqual((code, result["status"]), (0, "completed"))
+        self.assertEqual(req.call_args_list[-1].args[:2], ("POST", client.HUB + "/audio/diarize"))
+        self.assertEqual((saved["quota_observed"]["billing"], saved["quota_observed"]["estimate_rub"],
+                          saved["quota_observed"]["approved_limit_rub"]), ("wallet", 0.6, 1.0))
+        code, result, req = self.cli(["check", "--minutes", "2", "--wallet-limit", "0.6"],
+                                     [self.wallet_limits(), self.diarize_prices()])
+        self.assertEqual((code, result["status"]), (0, "ready"))
+
+    def test_wallet_refusals_happen_before_any_billed_request(self):
+        cases = {
+            "over the approved limit": ([self.wallet_limits(), self.diarize_prices()], "0.5", "exceeds the approved"),
+            "balance too low": ([self.wallet_limits(balance=0.5), self.diarize_prices()], "5", "balance"),
+            "key spending cap reached": ([self.wallet_limits(cap_blocked=True), self.diarize_prices()], "5", "spending cap"),
+            "key spending cap too low": ([self.wallet_limits(cap=1.0, spent=0.9), self.diarize_prices()], "5", "spending cap"),
+            "key not ok": ([self.wallet_limits(status="disabled"), self.diarize_prices()], "5", "ok key"),
+            "no price row": ([self.wallet_limits(), {"prices": []}], "5", "price"),
+            "rate is not a number": ([self.wallet_limits(), self.diarize_prices(rate=True)], "5", "price"),
+            "no wallet balance": ([dict(self.wallet_limits(), wallet={}), self.diarize_prices()], "5", "schema"),
+        }
+        for case, (responses, limit, reason) in cases.items():
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as tmp:
+                args = self.diarize_args(tmp)
+                argv = ["run", "diarize", "--file", args.file, "--minutes", "2", "--wallet-limit", limit,
+                        "--state", args.state, "--output", args.output]
+                code, result, req = self.cli(argv, responses)
+                self.assertEqual((code, result["status"]), (1, "blocked"))
+                self.assertIn(reason, result["errors"][0])
+                self.assertNotIn("POST", [c.args[0] for c in req.call_args_list])
+
+    def test_subscription_keys_are_preferred_over_wallet_keys(self):
+        keys = ("NEURALDEEP_DIARIZATION_API_KEY", ["wallet-secret", "subscription-secret"])
+        responses = [self.wallet_limits(), self.diarize_prices(),
+                     limits(), self.diarize_prices(), self.diarize_quota()]
+        code, result, req = self.cli(["check", "--minutes", "2", "--wallet-limit", "5"], responses, keys)
+        self.assertEqual((code, result["status"]), (0, "ready"))
+        self.assertEqual(result["quota_observed"]["billing"], "subscription")
+        self.assertEqual(result["quota_observed"]["key"]["index"], 2)
+
+    def test_the_wallet_does_not_unblock_disabled_services(self):
+        for service, price, reason in (("whisper", "gigaam-v3", "transcription disabled"),
+                                       ("speechcore", "speechcore", "uploads disabled")):
+            prices = {"prices": [{"model": price, "billing": "minute", "rub_per_min": 1.0, "premium": False}]}
+            with self.subTest(service=service):
+                code, result, _ = self.cli(["check", "--wallet-limit", "5"], [self.wallet_limits(), prices],
+                                           ("NEURALDEEP_API_KEY", ["wallet-secret"]), service)
+                self.assertEqual((code, result["status"]), (1, "blocked"))
+                self.assertIn(reason, result["errors"][0])
+
+    def test_wallet_estimates_follow_the_quota_units_and_price_kind(self):
+        ocr = {"prices": [{"model": "ocr:extract", "billing": "unit", "unit_rub": 1.0, "premium": False}]}
+        quote = client.wallet_quote("ocr", "extract", self.wallet_limits(), ocr, 6)  # 3 pages, pro
+        self.assertEqual((quote["units"], quote["estimate_rub"]), (6, 6.0))
+        minute = {"prices": [{"model": "audio:diarize", "billing": "minute", "rub_per_min": 0.333, "premium": False}]}
+        self.assertEqual(client.wallet_quote("diarize", "diarize", self.wallet_limits(), minute, 3)["estimate_rub"], 1.0)
+        with self.assertRaises(client.Blocked):
+            client.wallet_quote("diarize", "diarize", self.wallet_limits(),
+                                {"prices": [{"model": "audio:diarize", "billing": "token", "premium": False}]}, 3)
+
+    def test_wallet_limit_must_be_a_positive_number(self):
+        import io
+        import sys
+        for value in ("0", "-1", "nan", "inf", "x"):
+            with self.subTest(value=value), patch.object(client, "SERVICE", "diarize"), patch.object(client, "request") as req, \
+                    patch.object(sys, "argv", ["client.py", "check", "--wallet-limit", value]), \
+                    patch("sys.stdout", new_callable=io.StringIO), patch("sys.stderr", new_callable=io.StringIO):
+                with self.assertRaises(SystemExit) as raised:
+                    client.main()
+            self.assertEqual(raised.exception.code, 2)
+            req.assert_not_called()
+
+    def test_the_subscription_guard_names_the_failing_condition(self):
+        price = {"prices": [{"model": "audio:diarize", "premium": False}]}
+        for changes, reason in ((("key", "billing_mode", "trial"), "billing mode"), (("key", "status", "disabled"), "ok key"),
+                                ((None, "tier", "pro"), "Starter tier")):
+            lim = limits()
+            (lim[changes[0]] if changes[0] else lim)[changes[1]] = changes[2]
+            with self.subTest(reason=reason), self.assertRaises(client.Blocked) as raised:
+                client.guard("diarize", "diarize", lim, price, self.diarize_quota(), 1)
+            self.assertIn(reason, str(raised.exception))
+
+    def test_docs_explain_paying_from_the_wallet(self):
+        import re
+        root = Path(__file__).parents[1]
+        skill = (root / "SKILL.md").read_text(encoding="utf-8")
+        match = re.search(r"^## Paying from the wallet\n(.*?)(?=^## )", skill, re.M | re.S)
+        self.assertIsNotNone(match, "SKILL.md has no Paying from the wallet section")
+        for needle in ("wallet_approval_required", "--wallet-limit", "explicit yes", "Never pass `--wallet-limit` on your own",
+                       "prefers a subscription key", "spending cap"):
+            self.assertIn(needle, match.group(1))
+        self.assertIn("wallet_approval_required", (root / "STARTER_RELAY.md").read_text(encoding="utf-8"))
+
     def test_merge_cli_is_offline_and_writes_a_hashed_artifact(self):
         with tempfile.TemporaryDirectory() as tmp:
             code, result, output = self.merge_cli(tmp, self.diarization(), self.transcript_json())

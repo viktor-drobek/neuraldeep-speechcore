@@ -470,3 +470,19 @@ to read `~/.coddy/.env` itself. The new shared tests failed first.
 `LC_ALL=C PYTHONUTF8=0`, with no `EncodingWarning` under
 `-X warn_default_encoding`, and on Python 3.10.22 (Docker `python:3.10-slim`,
 non-root, no network).
+
+## Paying from the wallet
+
+Port from neuraldeep-diarization `21542cd`. A key in wallet mode can pay, but
+only with the user's approval: a wallet key skips the subscription quota and
+gets an estimate (quota units x the public price, rounded up to kopecks),
+checked against the wallet balance and the key's spending cap; subscription keys
+are preferred; without `--wallet-limit` (the roubles the user approved) `check`
+and `run` end `wallet_approval_required` with the estimate and nothing sent. In this skill the submission stays disabled, also from the wallet.
+The subscription guard names the failing condition. SKILL.md has a "Paying from
+the wallet" section, AGENTS.md forbids `--wallet-limit` without the user's
+approval, and STARTER_RELAY.md lists the new status. The new shared tests failed
+first. **145 tests passed** (1 skipped outside a tag build), both normally and
+with `LC_ALL=C PYTHONUTF8=0`, with no `EncodingWarning` under
+`-X warn_default_encoding`, and on Python 3.10.22 (Docker `python:3.10-slim`,
+non-root, no network).

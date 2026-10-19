@@ -36,6 +36,8 @@ CI (`.github/workflows/tests.yml`) runs the suite and `--help` on Python 3.10 an
 
 ## Rules
 
+- Never pass `--wallet-limit` without the user's explicit approval of that amount: a wallet
+  key spends money. `wallet_approval_required` is a question for the user, not an error to fix.
 - **Never call billed or live endpoints.** Do not run `scripts/client.py run`.
   `check` and `resume` use the user's real API key; run them only when the user
   asks. Tests must mock HTTP and must not need a credential.
