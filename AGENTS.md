@@ -8,8 +8,9 @@ in [SKILL.md](SKILL.md); its safety rules are in [STARTER_RELAY.md](STARTER_RELA
 
 - `SKILL.md`: the skill and NeuralDeep SpeechCore API reference.
 - `scripts/client.py`: a standard-library helper with a fail-closed Starter guard
-  and resumable jobs. SpeechCore uploads are **blocked on purpose**: only
-  `check upload` (always `blocked`) and `resume` of an existing job work.
+  and resumable jobs. A subscription key cannot upload (**blocked on purpose**); a
+  wallet key uploads only after the user approves the cost (`--wallet-limit`), and
+  `resume` reads an existing job.
 - `tests/`: offline tests with mocked HTTP. `TESTING.md` records every change and
   the current test count.
 - Python 3.10+ standard library only. No dependencies, no build step.
@@ -36,18 +37,21 @@ CI (`.github/workflows/tests.yml`) runs the suite and `--help` on Python 3.10 an
 
 ## Rules
 
+- Never pass `--wallet-limit` without the user's explicit approval of that amount: a wallet
+  key spends money. `wallet_approval_required` is a question for the user, not an error to fix.
 - **Never call billed or live endpoints.** Do not run `scripts/client.py run`.
   `check` and `resume` use the user's real API key; run them only when the user
   asks. Tests must mock HTTP and must not need a credential.
 - **Fail closed.** No retries or resubmission of a billed POST, no redirects, no
   API key or provider response body in errors or output. An ambiguous submission
   is `reconciliation_required`, not a reason to try again.
-- **Do not unblock SpeechCore or whisper-1 uploads.** They stay blocked until a
-  remaining-quota endpoint is verified; that is the user's decision.
+- **Do not unblock subscription uploads to SpeechCore or transcription.** They stay
+  blocked until a remaining-quota endpoint is verified; that is the user's decision.
+  A wallet key uploads only with the user's approved `--wallet-limit`.
 - **Test first.** Add or change a test, show it fails, then fix. Record the change
   and the new test count in `TESTING.md`.
 - **Keep the shared helper identical.** `scripts/client.py` is shared with
-  neuraldeep-search, -images, -ocr and -whisper-1; only the `SERVICE = "..."` line
+  neuraldeep-search, -images, -ocr, -transcriptions and -diarization; only the `SERVICE = "..."` line
   differs. Port any helper change to the other repos, and check with:
 
   ```bash
@@ -66,10 +70,12 @@ CI (`.github/workflows/tests.yml`) runs the suite and `--help` on Python 3.10 an
 
 ## Credentials
 
-The helper reads `api_key` from
-`${CODDY_HOME:-~/.coddy}/providers/neuraldeep/neuraldeep-auth.json`, then falls
-back to `NEURALDEEP_API_KEY`. Never print, log or commit either. Coddy users sign
-in with `coddy providers login neuraldeep`.
+The helper reads this skill's own `NEURALDEEP_SPEECHCORE_API_KEY`, then the shared
+`NEURALDEEP_API_KEY`, each from the environment, then from
+`${CODDY_HOME:-~/.coddy}/.env` (several keys separated by commas; the first that
+passes the free checks is used). It does not read the Coddy provider file. Never
+print, log or commit a key; ask the user to add a missing one to `~/.coddy/.env`,
+never in the chat.
 
 ## Delivery workflow
 

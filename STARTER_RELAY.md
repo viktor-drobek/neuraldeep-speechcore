@@ -2,7 +2,13 @@
 
 ## Before spending
 
-The helper is deliberately restricted to Starter subscription billing. Every
+In this repository a subscription key is blocked at the guard for uploads, because
+no SpeechCore remaining-quota endpoint is verified; a wallet key uploads only up to
+the amount the user approved, and `resume` reads an existing job.
+
+The helper spends from a Starter subscription, or from the wallet only up to an
+amount the user approved (`--wallet-limit`, see SKILL.md, "Paying from the wallet").
+For a subscription key every
 `run` re-reads `GET /v1/limits`, the public wallet prices, and the service quota.
 All of these must pass:
 
@@ -36,7 +42,8 @@ No credentials, account snapshots, or live remaining values are test fixtures.
 | Search | `/v1/search/quota`: `tier`; `search` and `crawl` each have `mode: tier`, `day.remaining`, `month.remaining` | `search:web`, `search:tg`, `search:crawl` |
 | OCR | `/v1/ocr/balance`: `tier`, `daily_pages.remaining`, `monthly_pages.remaining` | `ocr:extract` |
 | Images | `/v1/images/quota`: `tier`, `img.day.remaining`, `img.month.remaining` | `image:generate`, `image:upscale`, `image:background_remove`, `image:enhance`, `image:avatar` |
-| SpeechCore | **Unverified: uploads blocked.** The reference does not identify a live remaining-quota endpoint. | `speechcore` (non-premium alone is insufficient) |
+| SpeechCore | **Unverified: subscription uploads blocked.** The reference does not identify a live remaining-quota endpoint; a wallet key can pay with the user's approval. | `speechcore` (non-premium alone is insufficient) |
+| Diarization | `/v1/audio/diarize/quota`: `unit: minute`, `tier`, `day` and `month` each with `used` and `limit`; there is no `remaining` field, so the helper uses `limit - used` (verified read-only on 2026-10-18) | `audio:diarize` (`billing: unit`) |
 
 OCR requires a locally verified input page count through `--pages`. `fast`
 charges one quota page per sheet; `pro` charges two. The helper does not parse
@@ -47,8 +54,8 @@ wallet-affordable count for the daily and monthly subscription buckets.
 Image generation and processing POSTs return `{task_uid}`, not PNG bytes.
 All operations use `/v1/images/tasks/{uid}` until `finished`, then the binary
 `/result` endpoint. OCR uses `{id}` and `completed`; SpeechCore's documented
-`{task_id}` uses `completed`, but this helper only resumes existing SpeechCore
-jobs. Advertised daily ceilings are not a live budget and cannot unblock uploads.
+`{task_id}` uses `completed`; this helper uploads to SpeechCore only from an
+approved wallet key. Advertised daily ceilings are not a live budget and cannot unblock uploads.
 
 ## Run and recover
 
@@ -57,6 +64,31 @@ Use the worked commands in [SKILL.md](SKILL.md), from this directory.
 preflight, one submission, bounded polling where applicable, and artifact save.
 `--payload` reads JSON for Search or image generation; `--file` reads a local
 OCR/image input. Uploads require explicit user authorization for the content.
+
+Every upload is streamed in blocks: the multipart body is read from the file
+8 KB at a time (http.client's block size) and sent with a normal `Content-Length`, so the socket timeout
+bounds each block rather than the whole file, and no copy of the file is held
+in memory. The input is opened before any request, and anything but a readable
+regular file blocks there. Exactly the size checked is sent; a file that
+shrinks meanwhile fails the request.
+NeuralDeep documents no chunked or resumable upload for any of these endpoints,
+so a broken upload is never continued or resent: it ends like any failed submission.
+Only diarization documents a file size limit (500 MB), and the helper enforces
+exactly that; the other services document none, so none is assumed.
+
+Before any request, `run` also checks where the paid result will go: an
+`--output` that is the input file (also through a link or a case alias), a
+name the file system refuses ("Artifact path is not usable"; a new name is
+created and removed again to find names vfat or exFAT reject), the state file
+under a case alias, a directory, an existing FIFO, socket or device (also
+behind a symlink: "Artifact path is not a regular file"), and an input file that is the state file
+("Input file must differ from the state file"), or whose directory (before
+symlinks are resolved) is missing or read-only, blocks before the submission
+("Artifact path must differ from the input file", "Artifact path is a
+directory", "Artifact directory is missing or not writable"); the directory
+must be readable, writable and searchable. Another user's existing file in a
+sticky directory such as `/tmp`, which rename cannot replace, also blocks
+("Artifact path belongs to another user in a sticky directory").
 
 Choose a **new private state path** for new work. `run` refuses an existing
 state file, preventing accidental duplicate submissions. Do not delete or
@@ -99,15 +131,21 @@ Relay installation or configuration changes:
 - `task_id`: caller-owned task identifier (`--task-id`).
 - `service`: service name; `provider_job_id`: durable async provider ID, or null
   for synchronous Search and unacknowledged submissions. Never fabricate one.
-- `status`: `blocked`, `reconciliation_required`, `submitted`, `timed_out`,
-  `poll_error`, `failed`, or `completed`. A read-only check reports `ready`, not
+- `status`: `blocked`, `wallet_approval_required`, `reconciliation_required`,
+  `submitted`, `timed_out`, `poll_error`, `failed`, or `completed`.
+  `wallet_approval_required` means nothing was sent: a wallet key would pay, and
+  the user must approve the amount first. A read-only check reports `ready`, not
   a completed provider job.
 - `artifacts`: references with `sha256` and `provenance` (endpoint, retrieval time,
   `trust: untrusted_data`); no transcript or extracted content in the envelope.
-- `quota_observed`: timestamp, endpoint, relevant service buckets, required units;
+- `quota_observed`: timestamp, endpoint, relevant service buckets, required units,
+  and the key used, by variable and number (`key`), never its value;
   this is private runtime metadata, not a future spending guarantee.
 - `timeouts`, `errors`, and `updated_at`: operational diagnostics. Error text is
   sanitized; it does not include authorization headers or provider response bodies.
+  An HTTP error reads `HTTP <code> (<fixed hint>)`, with `retry after N s` and
+  `window session|week` only when the provider sends well-formed values; the
+  table in SKILL.md lists every explained status.
 
 Failed and timed-out jobs have no success artifact. Transfer referenced files
 through an authorized artifact channel; a local path is not a remote download

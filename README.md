@@ -1,7 +1,7 @@
 # 🎙️ neuraldeep-speechcore
 
-Resume existing transcription jobs and save validated transcript JSON with timestamps and speaker labels.
-New uploads are blocked until a remaining-quota endpoint is verified; SRT/VTT/DOCX/PDF exports are produced locally from the saved segments.
+Upload a recording with a wallet key after the user approves the cost, resume jobs, and save validated transcript JSON with timestamps and speaker labels.
+A subscription key cannot upload until a remaining-quota endpoint is verified; SRT/VTT/DOCX/PDF exports are produced locally from the saved segments.
 
 A [Coddy](https://coddy.dev) / AI-agent skill for the **NeuralDeep SpeechCore API**.
 
@@ -21,11 +21,15 @@ npx skillsbd add https://github.com/viktor-drobek/neuraldeep-speechcore --skill 
 
 ## Requirements
 
-- A NeuralDeep API key (`sk-...`). The skill reads it from
-  `${CODDY_HOME:-~/.coddy}/providers/neuraldeep/neuraldeep-auth.json` (field `api_key`),
-  falling back to `NEURALDEEP_API_KEY` when the file/key is missing, null, empty, or malformed.
+- A NeuralDeep API key (`sk-...`) in this skill's own variable `NEURALDEEP_SPEECHCORE_API_KEY` (several
+  keys may be separated by commas), or the shared `NEURALDEEP_API_KEY`, set in the
+  environment or in `${CODDY_HOME:-~/.coddy}/.env`:
+
+  ```bash
+  echo 'NEURALDEEP_SPEECHCORE_API_KEY=sk-...' >> ~/.coddy/.env
+  ```
 - Python 3.10+ (standard library only).
-- Get a key at <https://neuraldeep.ru> (Hub) or via `coddy providers login neuraldeep`.
+- Get a key at <https://neuraldeep.ru> (Hub).
 
 ## Usage
 
@@ -37,8 +41,9 @@ shapes, and worked examples.
 See [STARTER_RELAY.md](./STARTER_RELAY.md) for guarded commands, private job
 state, timeout recovery, and the optional artifact-based Relay envelope.
 The helper checks live service quota rather than hard-coding daily limits.
-SpeechCore upload is blocked until a remaining-quota endpoint is verified;
-resuming existing jobs remains read-only.
+A subscription upload is blocked until a remaining-quota endpoint is verified; a
+wallet key uploads only up to the amount the user approved (`--wallet-limit`), and
+resuming an existing job is read-only.
 
 Run offline tests: `python3 -B -m unittest discover -s tests`.
 

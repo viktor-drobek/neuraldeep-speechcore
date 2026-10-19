@@ -255,3 +255,271 @@ reads (`coddy skills list` showed `1.0.0` for a copy under a scratch
 **70 tests passed** (1 skipped outside a tag build), both normally and with
 `LC_ALL=C PYTHONUTF8=0`, with no `EncodingWarning` under
 `-X warn_default_encoding`.
+
+## Diarization service
+
+Port from neuraldeep-diarization: the shared helper now knows the `diarize`
+service (`POST /v1/audio/diarize`, price ID `audio:diarize`). Its quota at
+`/v1/audio/diarize/quota` reports `used` and `limit` minutes per `day` and
+`month`, verified read-only on 2026-10-18, and the guard requires `limit - used`
+to cover `--minutes`, at most 240, with files of at most 500 MB. An offline
+`merge` command joins a diarization with a timed transcript. `--minutes` and
+`merge` are refused for the other services (exit 2), and this service's
+behaviour is unchanged. The 16 shared tests and the merge case of the UTF-8 test
+were added first and failed with `KeyError: 'diarize'` and the missing
+`merge_transcript`. `STARTER_RELAY.md` lists the diarization bucket.
+**86 tests passed** (1 skipped outside a tag build), both normally and with
+`LC_ALL=C PYTHONUTF8=0`, with no `EncodingWarning` under
+`-X warn_default_encoding`.
+
+## Diarization formats and cross-review fixes
+
+Port from neuraldeep-diarization. `merge --format json|vtt|srt|rttm` writes
+WebVTT with voice tags, SRT with a speaker prefix, or RTTM converted locally
+from the diarization alone. A cross-review of the diarization skill led to
+shared fixes, each with a test written first:
+- the diarization POST waits `max(120, 30 * minutes)` s;
+- every service's `run` checks `--output` before any request, so an output
+  equal to `--file` or in a missing directory blocks instead of overwriting the
+  input or losing a paid answer;
+- subtitle speaker labels are flattened, and the 1 ms cue minimum applies after
+  rounding;
+- `finite()` rejects integers too large for a float;
+- `merge` sorts its inputs by time and compares overlaps to the microsecond;
+- the 500 MB cap is tested.
+`STARTER_RELAY.md` documents the output check, and this service is otherwise
+unchanged. The 15 new shared tests failed first, apart from the flag-rule and
+cap tests, which only add coverage.
+**101 tests passed** (1 skipped outside a tag build), both normally and with
+`LC_ALL=C PYTHONUTF8=0`, with no `EncodingWarning` under
+`-X warn_default_encoding`.
+
+## Second cross-review fixes
+
+Port from neuraldeep-diarization `e376732`. `run` now also blocks an
+`--output` that is a directory, and checks the unresolved parent that
+`atomic_write()` uses, so a symlink in a read-only directory blocks too.
+WebVTT and SRT get one cue per transcript segment, through `label_segments()`.
+Huge timestamps and deeply nested input JSON end `blocked`. `merge` parses
+input bytes, accepting a UTF-8 byte order mark, and names a file that is not
+valid JSON. The new and changed shared tests failed first, apart from the
+read-only and missing directory cases, which already passed.
+**106 tests passed** (1 skipped outside a tag build), both normally and with
+`LC_ALL=C PYTHONUTF8=0`, with no `EncodingWarning` under
+`-X warn_default_encoding`.
+
+## Third cross-review fixes
+
+Port from neuraldeep-diarization `e4bdae5`. `run` requires read, write and
+search permission on the output directory, since `atomic_write()` needs all
+three. `merge` decodes strict UTF-8 (a byte order mark is fine), so UTF-16,
+UTF-32 and surrogate bytes block; a missing input, an unwritable output and a
+lone surrogate escape block with their own messages. `--output` equal to
+`--diarization` is tested. The new shared tests failed first, apart from that
+coverage case. **108 tests passed** (1 skipped outside a tag build), both
+normally and with `LC_ALL=C PYTHONUTF8=0`, with no `EncodingWarning` under
+`-X warn_default_encoding`.
+
+## Fourth cross-review fixes
+
+Port from neuraldeep-diarization `336ccf4`. The output check uses
+`os.path.isdir()`, because `Path.is_dir()` raises `PermissionError` on Python
+3.10 to 3.12 and broke the 3.10 CI job; `run` blocks replacing another user's
+file in a sticky directory before any request; the RTTM file ID shows
+non-UTF-8 file name bytes as U+FFFD; a tie test has the first speaker last in
+alphabetical order. The sticky-directory and file-name tests failed first.
+**111 tests passed** (1 skipped outside a tag build), both normally and with
+`LC_ALL=C PYTHONUTF8=0`, with no `EncodingWarning` under
+`-X warn_default_encoding`, and on Python 3.10.22 (Docker `python:3.10-slim`,
+non-root, no network).
+
+## Fifth cross-review fixes
+
+Port from neuraldeep-diarization `49688de`. `run` blocks an output name the
+file system refuses (any `lstat` error except `FileNotFoundError`), and the
+`run` and `merge` same-file checks add `os.path.samefile()` for hard links and
+case aliases. `--format rttm` blocks a lone surrogate speaker label with its own
+message, and the diarization artifact is written with ASCII escapes. The new
+shared tests failed first. **115 tests passed** (1 skipped outside a tag build),
+both normally and with `LC_ALL=C PYTHONUTF8=0`, with no `EncodingWarning` under
+`-X warn_default_encoding`, and on Python 3.10.22 (Docker `python:3.10-slim`,
+non-root, no network).
+
+## Sixth cross-review fixes
+
+Port from neuraldeep-diarization `5916a17`. An output that is the state file
+through a case alias blocks once the state exists, before any request; a new
+output name is created with `O_EXCL` and removed before the preflight, so names
+vfat, exFAT or SMB refuse on create block early; consecutive unassigned merge
+segments stay separate turns. The new shared tests failed first.
+**118 tests passed** (1 skipped outside a tag build), both normally and with
+`LC_ALL=C PYTHONUTF8=0`, with no `EncodingWarning` under
+`-X warn_default_encoding`, and on Python 3.10.22 (Docker `python:3.10-slim`,
+non-root, no network).
+
+## Seventh cross-review fix
+
+Port from neuraldeep-diarization `c10a179`. Once the state exists, `run`
+blocks an input file that is the state file, also through a case alias, before
+any request; before, `--file x --state x` with no `x` sent the helper's own
+state JSON. The new shared test failed first. **119 tests passed** (1 skipped
+outside a tag build), both normally and with `LC_ALL=C PYTHONUTF8=0`, with no
+`EncodingWarning` under `-X warn_default_encoding`, and on Python 3.10.22
+(Docker `python:3.10-slim`, non-root, no network).
+
+## Eighth cross-review fixes
+
+Port from neuraldeep-diarization `14c0056`. The U+FFFD repair for non-UTF-8
+file names applies to the RTTM file ID only, so speaker labels with lone
+surrogates block as in the other formats instead of merging; the
+input-is-the-state test also covers a dangling symlink. The new RTTM test
+failed first. **120 tests passed** (1 skipped outside a tag build), both
+normally and with `LC_ALL=C PYTHONUTF8=0`, with no `EncodingWarning` under
+`-X warn_default_encoding`, and on Python 3.10.22 (Docker `python:3.10-slim`,
+non-root, no network).
+
+## Streamed uploads
+
+Port from neuraldeep-diarization `3b918a7`. `multipart()` returns an
+`UploadBody` that `http.client` reads in 8 KB blocks with a normal
+`Content-Length`, so the socket timeout bounds each block, not the whole
+upload, and no copy of the file is held in memory; exactly the checked size is
+sent. The provider documents no chunked or resumable upload, so a broken upload
+is never resent. `UPLOAD_LIMITS` keeps only documented limits (diarize
+500 MB); this service documents none. The shared multipart tests read the body
+with `drain()`. The new shared tests failed first. **124 tests passed**
+(1 skipped outside a tag build), both normally and with `LC_ALL=C PYTHONUTF8=0`,
+with no `EncodingWarning` under `-X warn_default_encoding`, and on Python
+3.10.22 (Docker `python:3.10-slim`, non-root, no network).
+
+## Uploads opened before any request
+
+Port from neuraldeep-diarization `4c7979f`. `multipart()` opens the input with
+`O_NONBLOCK`, takes the size from `fstat()` on the open file and refuses
+anything but a regular file, so an unreadable file, a directory or a FIFO
+blocks before the preflight instead of failing mid-upload as a false
+`reconciliation_required`; `execute()` closes a body that was never sent. The
+docs now say 8 KB blocks, `http.client`'s block size. The new shared
+tests failed first. **126 tests passed** (1 skipped outside a tag build), both
+normally and with `LC_ALL=C PYTHONUTF8=0`, with no `EncodingWarning` under
+`-X warn_default_encoding`, and on Python 3.10.22 (Docker `python:3.10-slim`,
+non-root, no network).
+
+## Blocking upload reads
+
+Port from neuraldeep-diarization `5e03e41`. `multipart()` clears `O_NONBLOCK`
+with `os.set_blocking()` after the regular-file check, because some FUSE or
+network file systems honour the flag on reads, which would look like a
+shrinking file after the POST started. The new shared test failed first.
+**127 tests passed** (1 skipped outside a tag build), both normally and with
+`LC_ALL=C PYTHONUTF8=0`, with no `EncodingWarning` under
+`-X warn_default_encoding`, and on Python 3.10.22 (Docker `python:3.10-slim`,
+non-root, no network).
+
+## Per-skill keys from Coddy's environment
+
+Port from neuraldeep-diarization `52f2d5c`. The helper reads this skill's own
+`NEURALDEEP_SPEECHCORE_API_KEY`, then the shared `NEURALDEEP_API_KEY`, each from the environment first,
+then from `${CODDY_HOME}/.env`, parsed with the rules of Coddy's loader, so a
+key added there works without a restart. A value may hold several keys
+separated by commas; the first whose free preflight passes is used, and the
+state records its variable and number, never its value, so `resume` uses the
+same key. The Coddy provider file `neuraldeep-auth.json` is no longer read.
+The docs ask the user to add the key to `~/.coddy/.env`, never in the chat; the
+test commands and CI also blank `NEURALDEEP_SPEECHCORE_API_KEY`. The new shared tests failed first, and
+every helper test now patches `resolve_keys`. **131 tests passed** (1 skipped
+outside a tag build), both normally and with `LC_ALL=C PYTHONUTF8=0`, with no
+`EncodingWarning` under `-X warn_default_encoding`, and on Python 3.10.22
+(Docker `python:3.10-slim`, non-root, no network).
+
+## Explained API errors
+
+Port from neuraldeep-diarization `9c19350`. An HTTP error now reads
+`HTTP <code> (<fixed hint>)` for every status the provider documents (400, 401,
+408, 422, 429, 500, 502, 503), with `retry after N s` and `window session|week`
+only for well-formed `Retry-After` and `X-Window` values; the provider's body and
+reason text are still never shown. SKILL.md has an "Error handling" table of
+these statuses, keeping this service's own notes, and a shared test keeps it in
+step with `ERROR_HINTS`. The three new shared tests failed first.
+**134 tests passed** (1 skipped outside a tag build), both normally and with
+`LC_ALL=C PYTHONUTF8=0`, with no `EncodingWarning` under
+`-X warn_default_encoding`, and on Python 3.10.22 (Docker `python:3.10-slim`,
+non-root, no network).
+
+## .env read as bytes
+
+Port from neuraldeep-diarization `69cedbd`. `read_dotenv()` decodes
+`${CODDY_HOME}/.env` with replacement, so one non-UTF-8 byte no longer hides
+every key in it, as in Coddy's line-by-line read; the Error handling table says
+the key may be in the environment or `~/.coddy/.env`; a cap test closes the
+upload files it opens. The new shared tests failed first. **135 tests passed**
+(1 skipped outside a tag build), both normally and with `LC_ALL=C PYTHONUTF8=0`,
+with no `EncodingWarning` under `-X warn_default_encoding`, no `ResourceWarning`
+under `-W always::ResourceWarning`, and on Python 3.10.22 (Docker
+`python:3.10-slim`, non-root, no network).
+
+## Non-regular outputs and the 401 row
+
+Port from neuraldeep-diarization `0cf376e`. `run` blocks, before any request,
+an existing `--output` that is a FIFO, socket or device (also behind a
+symlink), which `atomic_write()` would replace after the paid request; a
+dangling symlink is still replaced like a missing file. The 401 row of the
+Error handling table asks the user to check the key and tells the agent never
+to read `~/.coddy/.env` itself. The new shared tests failed first.
+**136 tests passed** (1 skipped outside a tag build), both normally and with
+`LC_ALL=C PYTHONUTF8=0`, with no `EncodingWarning` under
+`-X warn_default_encoding`, and on Python 3.10.22 (Docker `python:3.10-slim`,
+non-root, no network).
+
+## Paying from the wallet
+
+Port from neuraldeep-diarization `21542cd`. A key in wallet mode can pay, but
+only with the user's approval: a wallet key skips the subscription quota and
+gets an estimate (quota units x the public price, rounded up to kopecks),
+checked against the wallet balance and the key's spending cap; subscription keys
+are preferred; without `--wallet-limit` (the roubles the user approved) `check`
+and `run` end `wallet_approval_required` with the estimate and nothing sent. In this skill the submission stays disabled, also from the wallet.
+The subscription guard names the failing condition. SKILL.md has a "Paying from
+the wallet" section, AGENTS.md forbids `--wallet-limit` without the user's
+approval, and STARTER_RELAY.md lists the new status. The new shared tests failed
+first. **145 tests passed** (1 skipped outside a tag build), both normally and
+with `LC_ALL=C PYTHONUTF8=0`, with no `EncodingWarning` under
+`-X warn_default_encoding`, and on Python 3.10.22 (Docker `python:3.10-slim`,
+non-root, no network).
+
+## Wallet-paid transcription and SpeechCore uploads
+
+Port from neuraldeep-diarization `309f18a`. With a wallet key and the user's
+approval (`--wallet-limit`) the shared helper now posts `file` and `model` to
+`/v1/audio/transcriptions` and validates the synchronous answer, or posts the
+file to SpeechCore's `/upload` and polls the job; subscription keys stay blocked
+at the guard, since neither service has a verified remaining-quota endpoint.
+`--minutes` is required for every minute-billed service, and the wallet warning
+names the price row's output-token rate when it has one. This skill's SKILL.md, README.md, AGENTS.md, STARTER_RELAY.md and `client` rule now describe wallet uploads; a new documentation test in `tests/test_examples.py` failed first.
+The new shared tests failed first. **150 tests passed** (1 skipped outside a tag
+build), both normally and with `LC_ALL=C PYTHONUTF8=0`, with no `EncodingWarning`
+under `-X warn_default_encoding`, and on Python 3.10.22 (Docker
+`python:3.10-slim`, non-root, no network).
+
+## Missing home directory
+
+Port from neuraldeep-diarization `03eb992`. When no home directory can be
+determined, `resolve_keys()` treats it as "no .env" and the CLI prints the
+blocked envelope instead of a traceback. The new shared test failed
+first. **151 tests passed** (1 skipped outside a tag build), both normally and
+with `LC_ALL=C PYTHONUTF8=0`, with no `EncodingWarning` under
+`-X warn_default_encoding`, and on Python 3.10.22 (Docker `python:3.10-slim`,
+non-root, no network).
+
+## Release metadata (v2.0.0)
+
+`metadata.version` is now 2.0.0, a major release under semantic versioning,
+because the key source changed incompatibly: the helper no longer reads the
+Coddy provider file `providers/neuraldeep/neuraldeep-auth.json`, only this
+skill's own variable and the shared `NEURALDEEP_API_KEY` from the environment or
+`${CODDY_HOME:-~/.coddy}/.env`; a key kept only in the provider file must be
+added to `.env`. The other changes since v1.0.0 add features: the diarize
+service and its formats, streamed uploads with documented size limits,
+explained API errors, wallet billing with the user's approval, and wallet-paid
+transcription and SpeechCore uploads. `tests/test_release.py` passes; the tag
+check runs on the `v2.0.0` tag build after the merge.

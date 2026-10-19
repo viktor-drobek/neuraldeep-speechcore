@@ -17,9 +17,9 @@ This always-on rule supplements the common policy in `AGENTS.md`.
 Run the full offline matrix before reporting completion:
 
 ```bash
-env -u NEURALDEEP_API_KEY CODDY_HOME=/nonexistent python3 -B -m unittest discover -s tests
-env -u NEURALDEEP_API_KEY CODDY_HOME=/nonexistent LC_ALL=C PYTHONUTF8=0 python3 -B -m unittest discover -s tests
-env -u NEURALDEEP_API_KEY CODDY_HOME=/nonexistent python3 -X warn_default_encoding -B -m unittest discover -s tests
+env -u NEURALDEEP_API_KEY -u NEURALDEEP_SPEECHCORE_API_KEY CODDY_HOME=/nonexistent python3 -B -m unittest discover -s tests
+env -u NEURALDEEP_API_KEY -u NEURALDEEP_SPEECHCORE_API_KEY CODDY_HOME=/nonexistent LC_ALL=C PYTHONUTF8=0 python3 -B -m unittest discover -s tests
+env -u NEURALDEEP_API_KEY -u NEURALDEEP_SPEECHCORE_API_KEY CODDY_HOME=/nonexistent python3 -X warn_default_encoding -B -m unittest discover -s tests
 python3 -B scripts/client.py --help
 ```
 
