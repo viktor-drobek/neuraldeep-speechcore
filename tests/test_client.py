@@ -1974,6 +1974,21 @@ class SafetyTests(unittest.TestCase):
             self.assertIn(needle, match.group(1))
         self.assertIn("wallet_approval_required", (root / "STARTER_RELAY.md").read_text(encoding="utf-8"))
 
+    # Fourteenth cross-review (2026-10-19).
+    def test_an_unknown_home_directory_gives_the_missing_key_answer(self):
+        import io
+        import sys
+        for env in ({"CODDY_HOME": "~nosuchuserxyz/.coddy"}, {}):
+            with self.subTest(env=env), patch.dict(os.environ, env, clear=True), \
+                    patch.object(client.Path, "home", side_effect=RuntimeError("Could not determine home directory.")):
+                with self.assertRaises(client.Blocked) as raised:
+                    client.resolve_keys("diarize")
+                self.assertIn("No NeuralDeep key", str(raised.exception))
+                with patch.object(client, "SERVICE", "diarize"), patch.object(sys, "argv", ["client.py", "check", "--minutes", "1"]), \
+                        patch("sys.stdout", new_callable=io.StringIO) as out:
+                    self.assertEqual(client.main(), 1)
+                self.assertEqual(json.loads(out.getvalue())["status"], "blocked")
+
     def test_merge_cli_is_offline_and_writes_a_hashed_artifact(self):
         with tempfile.TemporaryDirectory() as tmp:
             code, result, output = self.merge_cli(tmp, self.diarization(), self.transcript_json())

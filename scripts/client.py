@@ -146,7 +146,12 @@ def resolve_keys(service=None):
         keys = usable_keys(os.environ.get(name))
         if not keys:
             if dotenv is None:
-                dotenv = read_dotenv(Path(os.environ.get("CODDY_HOME") or Path.home() / ".coddy").expanduser())
+                try:
+                    home = Path(os.environ.get("CODDY_HOME") or Path.home() / ".coddy").expanduser()
+                except (RuntimeError, KeyError):  # no home directory to expand: no .env
+                    dotenv = {}
+                else:
+                    dotenv = read_dotenv(home)
             keys = usable_keys(dotenv.get(name))
         if keys:
             return name, keys
