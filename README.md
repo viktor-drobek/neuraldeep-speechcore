@@ -7,7 +7,7 @@ A [Coddy](https://coddy.dev) / AI-agent skill for the **NeuralDeep SpeechCore AP
 
 ## Author
 
-These skills were authored by the **kimi2.6** and **qwen3.8 27b** models, and are published by **viktor-drobek**.
+**Viktor Drobek**
 
 ## Install
 
