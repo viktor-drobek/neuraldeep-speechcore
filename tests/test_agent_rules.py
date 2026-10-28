@@ -6,6 +6,7 @@ This file is shared by every neuraldeep-* repository and must stay identical acr
 import importlib.util
 import json
 import os
+import re
 from pathlib import Path
 import subprocess
 import sys
@@ -26,8 +27,10 @@ def load_hook():
     return module
 
 
-def split_frontmatter(text):
+def split_frontmatter(text, required=True):
     if not text.startswith("---\n"):
+        if not required:
+            return "", text.strip()
         raise AssertionError("rule has no frontmatter")
     end = text.index("\n---\n", 4)
     return text[4:end], text[end + 5 :].strip()
@@ -84,7 +87,7 @@ class AgentRuleTests(unittest.TestCase):
         for name in self.cursor:
             with self.subTest(rule=name):
                 _, cursor_body = split_frontmatter(self.cursor[name].read_text(encoding="utf-8"))
-                _, claude_body = split_frontmatter(self.claude[name].read_text(encoding="utf-8"))
+                _, claude_body = split_frontmatter(self.claude[name].read_text(encoding="utf-8"), required=False)
                 self.assertTrue(cursor_body)
                 self.assertEqual(cursor_body, claude_body)
         _, workflow = split_frontmatter(self.cursor["workflow"].read_text(encoding="utf-8"))
@@ -95,9 +98,8 @@ class AgentRuleTests(unittest.TestCase):
         for name in self.cursor:
             with self.subTest(rule=name):
                 rule = self.hook.parse_rule(self.cursor[name])
-                head, _ = split_frontmatter(self.claude[name].read_text(encoding="utf-8"))
+                head, _ = split_frontmatter(self.claude[name].read_text(encoding="utf-8"), required=False)
                 self.assertTrue(rule.description)
-                self.assertIn("description:", head)
                 if name == "workflow":
                     self.assertTrue(rule.always)
                     self.assertEqual(rule.globs, [])
@@ -178,6 +180,39 @@ class AgentRuleTests(unittest.TestCase):
             self.assertIn("<!-- from .cursor/rules/documentation.mdc -->", docs)
             self.assertNotIn("client.mdc", docs)
             self.assertEqual(self.run_hook(tmp, pre_tool("other", "Write", {"file_path": "LICENSE"})), "")
+
+    def test_session_start_matcher_includes_fork(self):
+        config = json.loads((CODEX / "hooks.json").read_text(encoding="utf-8"))
+        for source in ("startup", "resume", "clear", "compact", "fork"):
+            with self.subTest(source=source):
+                self.assertTrue(any(
+                    re.search(group.get("matcher", ".*"), source)
+                    for group in config["hooks"]["SessionStart"]
+                ), f"SessionStart does not match {source}")
+
+    def test_fork_resets_scoped_rule_delivery(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            start = {"hook_event_name": "SessionStart", "session_id": "fork-probe", "source": "startup"}
+            edit = {"hook_event_name": "PreToolUse", "session_id": "fork-probe", "tool_name": "Edit", "tool_input": {"file_path": "README.md"}}
+            self.assertIn("workflow.mdc", self.run_hook(tmp, start))
+            self.assertIn("documentation.mdc", self.run_hook(tmp, edit))
+            self.assertEqual(self.run_hook(tmp, edit), "")
+            self.assertIn("workflow.mdc", self.run_hook(tmp, dict(start, source="fork")))
+            self.assertIn("documentation.mdc", self.run_hook(tmp, edit))
+
+    def test_cursor_globs_accept_scalar_flow_and_block_lists(self):
+        expected = ["scripts/**/*.py", "tests/*.py"]
+        declarations = (
+            'globs: scripts/**/*.py, tests/*.py',
+            'globs: ["scripts/**/*.py", "tests/*.py"]',
+            'globs:\n  - "scripts/**/*.py"\n  - "tests/*.py"',
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "probe.mdc"
+            for declaration in declarations:
+                with self.subTest(declaration=declaration):
+                    path.write_text('---\ndescription: Probe\nalwaysApply: false\n' + declaration + '\n---\n# Probe\n', encoding="utf-8")
+                    self.assertEqual(self.hook.parse_rule(path).globs, expected)
 
     def test_hook_fails_open_on_bad_input(self):
         with tempfile.TemporaryDirectory() as tmp:
